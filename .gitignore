@@ -1,0 +1,10 @@
+# Môi trường ảo
+.venv/
+venv/
+
+# Biến môi trường bảo mật
+.env
+
+# Cache của Python
+__pycache__/
+*.pyc
