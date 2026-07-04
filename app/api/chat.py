@@ -1,77 +1,175 @@
-# app/api/chat.py
+"""
+app/api/chat.py
+
+So với bản refactor trước, file này bổ sung:
+1. Import ChatRequest từ app.schemas.chat thay vì định nghĩa lại
+   (single source of truth cho data contract).
+2. Khởi tạo OllamaService bằng giá trị từ settings (config.py) thay vì
+   hardcode, để đổi model/timeout chỉ cần sửa .env.
+3. QUAN TRỌNG NHẤT: chuyển streaming từ "text/plain" thô sang chuẩn
+   Server-Sent Events (SSE, media_type="text/event-stream").
+
+Tại sao cần SSE thay vì stream text thô?
+-------------------------------------------
+Với "text/plain" thô, frontend nhận được một luồng ký tự liên tục và
+KHÔNG CÓ CÁCH NÀO phân biệt được: đâu là token của câu trả lời, khi nào
+model đã trả lời xong, hay có lỗi xảy ra giữa chừng (ví dụ Ollama timeout
+sau khi đã gửi vài chữ). Frontend chỉ có thể "đoán" bằng cách chờ stream
+đóng lại.
+
+SSE giải quyết việc này bằng cách đóng gói MỖI mẩu dữ liệu thành một
+message có cấu trúc: mỗi dòng bắt đầu bằng "data: ", kết thúc bằng 2 dấu
+xuống dòng "\n\n". Ở đây mình dùng payload JSON bên trong "data: " để có
+thể phân loại rõ 3 loại event:
+    - {"type": "chunk", "content": "..."}   -> 1 mẩu text của câu trả lời
+    - {"type": "done"}                       -> đã trả lời xong
+    - {"type": "error", "message": "..."}    -> có lỗi giữa chừng
+
+Nhờ vậy, code React/Vue phía frontend có thể viết switch-case rõ ràng
+theo "type", thay vì phải đoán ý nghĩa của một đoạn text thô.
+"""
+
+import re
 import json
+import logging
+
 from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from app.models.chat import ChatRequest
-from app.core.database import supabase
-from app.services.gemini_service import gemini_service
+
+from app.core.config import settings
+from app.schemas.chat import ChatRequest
+from app.services.business_engine import business_engine
+from app.services.ollama_service import OllamaService
+
+logger = logging.getLogger("woodhub.chat")
 
 router = APIRouter()
 
-def check_and_update_usage(session_id: str, is_guest: bool) -> int:
-    """Kiểm tra xem session_id đã vượt quá lượt hỏi quy định chưa"""
-    limit_max = 5 if is_guest else 50 # Khách 5 câu, Thành viên 50 câu
-    
-    # Truy vấn số lượt đã hỏi từ Supabase
-    res = supabase.table("user_usage_limits").select("request_count").eq("session_id", session_id).execute()
-    
-    if not res.data:
-        # Nếu chưa từng hỏi, tạo mới dòng lưu vết
-        supabase.table("user_usage_limits").insert({"session_id": session_id, "request_count": 1}).execute()
-        return 1
-    
-    current_count = res.data[0]["request_count"]
-    
-    # Nếu vượt quá giới hạn, chặn luôn
-    if current_count >= limit_max:
-        raise HTTPException(
-            status_code=429, 
-            detail=f"Bạn đã dùng hết {limit_max} lượt hỏi miễn phí cho phiên này. Vui lòng đăng nhập hoặc nâng cấp tài khoản!"
-        )
-        
-    # Nếu còn lượt, tăng số lượt lên 1
-    new_count = current_count + 1
-    supabase.table("user_usage_limits").update({"request_count": new_count}).eq("session_id", session_id).execute()
-    return new_count
+# Khởi tạo service 1 lần duy nhất lúc import module, dùng giá trị từ
+# settings thay vì hardcode -> đổi model/timeout chỉ cần sửa .env.
+ollama_service = OllamaService(
+    model_name=settings.OLLAMA_MODEL,
+    request_timeout=settings.OLLAMA_TIMEOUT,
+    num_predict=settings.OLLAMA_NUM_PREDICT,
+    temperature=settings.OLLAMA_TEMPERATURE,
+)
+
+OUT_OF_SCOPE_KEYWORDS = [
+    "chính trị", "tổng thống", "bầu cử",
+    "thời tiết", "dự báo",
+    "bóng đá", "world cup", "thể thao",
+    "lập trình", "code", "python", "javascript",
+]
+
+OUT_OF_SCOPE_MESSAGE = (
+    "Xin lỗi bạn, mình là trợ lý bán hàng của WoodHub, mình chỉ hỗ trợ các thông tin "
+    "liên quan đến sản phẩm nội thất, tìm kiếm sản phẩm, giỏ hàng và đơn hàng của WoodHub."
+)
+
+
+def is_out_of_scope(query: str) -> bool:
+    """Chặn sớm các câu hỏi rõ ràng lạc đề, không tốn round-trip tới LLM."""
+    q = query.lower()
+    return any(keyword in q for keyword in OUT_OF_SCOPE_KEYWORDS)
+
+
+def get_intent_and_data(req: ChatRequest) -> dict:
+    """
+    Hàm này VẪN đồng bộ (vì business_engine dùng Supabase client đồng bộ),
+    nên LUÔN được gọi qua run_in_threadpool ở route bên dưới, không bao
+    giờ gọi trực tiếp trong hàm async def.
+    """
+    q = req.query.lower()
+    result = {"data": None, "suppliers": None}
+
+    if "giỏ hàng" in q or "xem giỏ" in q:
+        result["data"] = business_engine.view_cart(req.session_id)
+
+    elif ("cm" in q or "kích thước" in q or "tính" in q) and re.findall(r"\d+", q):
+        numbers = re.findall(r"\d+", q)
+        if len(numbers) < 3:
+            result["data"] = {
+                "status": "error",
+                "message": "Vui lòng cung cấp đủ 3 kích thước (dài x rộng x cao), ví dụ: 100x50x30cm.",
+            }
+        else:
+            wood = "sồi"
+            for w_type in ["óc chó", "tần bì", "thông", "sồi"]:
+                if w_type in q:
+                    wood = w_type
+                    break
+            result["data"] = business_engine.estimate_custom_3d(
+                wood, float(numbers[0]), float(numbers[1]), float(numbers[2])
+            )
+
+    else:
+        result["data"] = business_engine.search_product(req.query)
+
+    if req.lat is not None and req.lng is not None:
+        result["suppliers"] = business_engine.find_suppliers_nearby(req.lat, req.lng)
+
+    return result
+
+
+def sse_event(event_type: str, **payload) -> str:
+    """
+    Đóng gói 1 sự kiện theo đúng chuẩn Server-Sent Events.
+
+    Format chuẩn: 1 dòng bắt đầu bằng "data: ", kết thúc bằng "\n\n" để
+    client biết đây là ranh giới của một message hoàn chỉnh. Payload bên
+    trong là JSON để frontend luôn parse được một cấu trúc thống nhất,
+    thay vì phải suy đoán ý nghĩa của text thô.
+    """
+    data = json.dumps({"type": event_type, **payload}, ensure_ascii=False)
+    return f"data: {data}\n\n"
+
+
+async def sse_stream(query: str, context: dict):
+    """Wrap luồng text thô từ OllamaService thành các SSE event có cấu trúc."""
+    try:
+        async for chunk in ollama_service.generate_response_stream(query, context):
+            yield sse_event("chunk", content=chunk)
+        yield sse_event("done")
+    except Exception:
+        logger.exception("Lỗi khi stream phản hồi cho query: %s", query)
+        yield sse_event("error", message="Hệ thống đang gặp sự cố, vui lòng thử lại sau.")
+
 
 @router.post("/chat")
 async def chat_endpoint(request: ChatRequest):
-    print("\n====== KIỂM TRA DỮ LIỆU TỪ FRONTEND ======")
-    print(f"-> Người dùng gõ: {request.user_prompt}")
-    print(f"-> Session ID: {request.session_id}")
-    session_id = request.session_id.strip()
-    if not session_id:
-        raise HTTPException(status_code=400, detail="Thiếu session_id")
-        
-    # 1. Nhận diện người dùng dựa vào tiền tố của session_id
-    # Quy ước: Nếu Frontend truyền session_id bắt đầu bằng "guest_", coi như chưa đăng nhập
-    is_guest = session_id.startswith("guest_")
-    
-    # 2. Kiểm tra giới hạn số câu hỏi
-    check_and_update_usage(session_id, is_guest)
-        
-    # 3. Tạo một hàm Generator để stream dữ liệu
-    async def event_generator():
-        try:
-            # Nếu là khách, gửi thông báo cấu trúc chặn chức năng nâng cao (ép AI chỉ dùng Search)
-            intent_type = "GUEST_SEARCH" if is_guest else "FULL_ACCESS"
-            yield "data: " + json.dumps({"intent": intent_type, "status": "streaming_started"}) + "\n\n"
-            
-            # Sửa prompt linh hoạt dựa trên quyền hạn người dùng
-            prompt_modifier = ""
-            if is_guest:
-                prompt_modifier = "\n[LƯU Ý HỆ THỐNG]: Người dùng này chưa đăng nhập (GUEST). BẠN TUYỆT ĐỐI KHÔNG ĐƯỢC gọi các hàm liên quan đến Giỏ hàng (add_to_cart, view_cart) hay Thanh toán. Nếu họ yêu cầu mua hàng, hãy lịch sự bảo họ đăng nhập trước."
-            
-            # Gọi Stream từ Gemini
-            async for chunk in gemini_service.generate_response_stream(
-                session_id=session_id,
-                user_message=request.user_prompt + prompt_modifier
-            ):
-                yield f"data: {json.dumps({'answer_chunk': chunk}, ensure_ascii=False)}\n\n"
-                
-            yield "data: " + json.dumps({"status": "completed"}, ensure_ascii=False) + "\n\n"
-            
-        except Exception as e:
-            yield "data: " + json.dumps({"error": str(e)}, ensure_ascii=False) + "\n\n"
+    # Chặn sớm câu hỏi ngoài phạm vi -> phản hồi tức thì, không gọi Supabase/Ollama.
+    if is_out_of_scope(request.query):
+        async def scope_stream():
+            yield sse_event("chunk", content=OUT_OF_SCOPE_MESSAGE)
+            yield sse_event("done")
+        return StreamingResponse(scope_stream(), media_type="text/event-stream")
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    try:
+        # Đẩy toàn bộ I/O đồng bộ (Supabase) ra khỏi event loop chính.
+        full_result = await run_in_threadpool(get_intent_and_data, request)
+    except Exception:
+        logger.exception("Lỗi khi truy vấn business_engine cho session_id=%s", request.session_id)
+        raise HTTPException(
+            status_code=503,
+            detail="Hệ thống dữ liệu tạm thời không khả dụng, vui lòng thử lại sau.",
+        )
+
+    data = full_result["data"]
+
+    if isinstance(data, dict) and "estimated_price" in data:
+        context = {
+            "estimated_price": data.get("estimated_price"),
+            "message": data.get("message"),
+            "suppliers": full_result.get("suppliers"),
+        }
+    else:
+        context = full_result
+
+    return StreamingResponse(
+        sse_stream(request.query, context),
+        media_type="text/event-stream",
+        # Header khuyến nghị cho SSE khi chạy sau reverse proxy (Nginx):
+        # tắt buffering để chunk được đẩy ra ngay, không bị proxy giữ lại.
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )

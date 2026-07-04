@@ -5,7 +5,6 @@ from app.services.gemini_service import gemini_service
 
 class OrchestratorEngine:
     def __init__(self):
-        # Conversation Memory được quản lý bên trong gemini_service.py của em
         self.llm = gemini_service
         
     def process_request(self, session_id: str, user_message: str) -> dict:
