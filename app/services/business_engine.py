@@ -1,7 +1,3 @@
-"""
-app/services/business_engine.py
-"""
-
 import math
 import logging
 
@@ -9,21 +5,17 @@ from app.core.database import supabase
 
 logger = logging.getLogger("woodhub.business_engine")
 
-
 class BusinessEngine:
-    # Hệ số giá theo loại gỗ (nhân với đơn giá cơ bản cho 1m3)
     WOOD_COEFFICIENTS = {
-        "sồi": 1.0,      # Oak
-        "óc chó": 2.5,   # Walnut
-        "tần bì": 1.1,   # Ash
-        "thông": 0.7,    # Pine
+        "sồi": 1.0,      
+        "óc chó": 2.5,   
+        "tần bì": 1.1,   
+        "thông": 0.7,    
     }
 
-    # --- TÍNH TOÁN KHOẢNG CÁCH ---
     @staticmethod
     def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Helper: Tính khoảng cách (km) giữa 2 điểm tọa độ GPS."""
-        R = 6371  # Bán kính trái đất (km)
+        R = 6371  
         dlat = math.radians(lat2 - lat1)
         dlon = math.radians(lon2 - lon1)
         a = (
@@ -33,7 +25,6 @@ class BusinessEngine:
         c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
         return round(R * c, 2)
 
-    # --- SẢN PHẨM & GIỎ HÀNG ---
     @staticmethod
     def search_product(product_name: str) -> dict:
         clean_name = product_name.strip().lower()
@@ -41,8 +32,6 @@ class BusinessEngine:
             return {"status": "error", "message": "Vui lòng cung cấp từ khóa tìm kiếm."}
 
         try:
-            # Gộp query: lấy product + variants trong 1 lần gọi bằng embed resource
-            # của PostgREST, thay vì 2-3 round-trip riêng lẻ như bản gốc.
             res = (
                 supabase.table("products")
                 .select("id, name, description, status, product_variants(sku, color, dimensions, price)")
@@ -55,7 +44,6 @@ class BusinessEngine:
             return {"status": "error", "message": "Không thể truy vấn dữ liệu sản phẩm lúc này."}
 
         if not res.data:
-            # Fallback: thử tìm theo SKU nếu không match theo tên.
             try:
                 variant_res = (
                     supabase.table("product_variants")
@@ -127,14 +115,6 @@ class BusinessEngine:
             )
             product_name = prod_res.data[0]["name"] if prod_res.data else "Sản phẩm"
 
-            # QUAN TRỌNG: dùng upsert thay vì "select rồi insert/update" để tránh
-            # race condition khi 2 request cùng session_id đến gần như đồng thời.
-            # Yêu cầu: tạo UNIQUE constraint (session_id, product_variant_sku)
-            # trên bảng cart_items ở Supabase để on_conflict hoạt động đúng.
-            #
-            # Lưu ý: upsert theo cách dưới đây sẽ GHI ĐÈ quantity, không cộng dồn.
-            # Nếu cần cộng dồn số lượng một cách atomic, nên tạo Postgres function
-            # (RPC) dùng "INSERT ... ON CONFLICT DO UPDATE SET quantity = quantity + EXCLUDED.quantity".
             existing = (
                 supabase.table("cart_items")
                 .select("id, quantity")
@@ -184,27 +164,18 @@ class BusinessEngine:
         total = sum(float(item["price_at_addition"]) * item["quantity"] for item in res.data)
         return {"status": "success", "items": res.data, "total": total}
 
-    # --- TÌM CHI NHÁNH GẦN NHẤT ---
     @staticmethod
     def find_suppliers_nearby(user_lat: float, user_lng: float, max_dist_km: float = 50.0) -> dict:
-        """
-        Tìm chi nhánh (stores) gần nhất dựa trên tọa độ.
-
-        LƯU Ý VỀ SCALABILITY: cách làm hiện tại fetch toàn bộ bảng "stores" về
-        rồi tính Haversine bằng Python. Với vài chục - vài trăm cửa hàng thì ổn,
-        nhưng khi dữ liệu lớn (hàng nghìn dòng), nên chuyển sang PostGIS:
-        tạo cột "location geography(Point, 4326)" + GIST index, rồi lọc bằng
-        ST_DWithin ngay trong Postgres (qua supabase.rpc(...)), để chỉ trả về
-        vài dòng gần nhất thay vì kéo cả bảng về ứng dụng.
-        """
         try:
+            # Đã sửa "name" thành "store_name" để fix lỗi code: 42703
+            # Lưu ý: Hãy kiểm tra bảng stores trên Supabase, nếu bạn đặt là "title" hoặc tên khác thì sửa lại chữ "store_name" cho khớp nhé.
             res = (
                 supabase.table("stores")
-                .select("id, name, address, lat, lng, supplier_id")
+                .select("id, store_name, address, lat, lng, supplier_id")
                 .execute()
             )
-        except Exception:
-            logger.exception("Lỗi find_suppliers_nearby(lat=%s, lng=%s)", user_lat, user_lng)
+        except Exception as e:
+            logger.exception("Lỗi find_suppliers_nearby(lat=%s, lng=%s) - Lỗi chi tiết: %s", user_lat, user_lng, e)
             return {"status": "error", "message": "Không thể tìm cửa hàng gần bạn lúc này."}
 
         if not res.data:
@@ -225,7 +196,6 @@ class BusinessEngine:
 
     @staticmethod
     def estimate_custom_3d(wood_type: str, w: float, h: float, d: float) -> dict:
-        # Validate kích thước để tránh giá 0đ hoặc âm do input sai.
         if w <= 0 or h <= 0 or d <= 0:
             return {"status": "error", "message": "Kích thước (dài, rộng, cao) phải lớn hơn 0."}
 
@@ -239,8 +209,6 @@ class BusinessEngine:
 
         return {
             "status": "success",
-            # Trả kèm giá trị số thô để tầng trên (chat.py) có thể tái sử dụng
-            # mà không phải parse lại chuỗi đã format.
             "estimated_price": round(estimated_price, 0),
             "price_display": formatted_price,
             "message": f"Với kích thước {w}x{h}x{d}cm và gỗ {wood_type}, giá ước tính là {formatted_price}.",

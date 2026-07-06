@@ -1,34 +1,3 @@
-"""
-app/api/chat.py
-
-So với bản refactor trước, file này bổ sung:
-1. Import ChatRequest từ app.schemas.chat thay vì định nghĩa lại
-   (single source of truth cho data contract).
-2. Khởi tạo OllamaService bằng giá trị từ settings (config.py) thay vì
-   hardcode, để đổi model/timeout chỉ cần sửa .env.
-3. QUAN TRỌNG NHẤT: chuyển streaming từ "text/plain" thô sang chuẩn
-   Server-Sent Events (SSE, media_type="text/event-stream").
-
-Tại sao cần SSE thay vì stream text thô?
--------------------------------------------
-Với "text/plain" thô, frontend nhận được một luồng ký tự liên tục và
-KHÔNG CÓ CÁCH NÀO phân biệt được: đâu là token của câu trả lời, khi nào
-model đã trả lời xong, hay có lỗi xảy ra giữa chừng (ví dụ Ollama timeout
-sau khi đã gửi vài chữ). Frontend chỉ có thể "đoán" bằng cách chờ stream
-đóng lại.
-
-SSE giải quyết việc này bằng cách đóng gói MỖI mẩu dữ liệu thành một
-message có cấu trúc: mỗi dòng bắt đầu bằng "data: ", kết thúc bằng 2 dấu
-xuống dòng "\n\n". Ở đây mình dùng payload JSON bên trong "data: " để có
-thể phân loại rõ 3 loại event:
-    - {"type": "chunk", "content": "..."}   -> 1 mẩu text của câu trả lời
-    - {"type": "done"}                       -> đã trả lời xong
-    - {"type": "error", "message": "..."}    -> có lỗi giữa chừng
-
-Nhờ vậy, code React/Vue phía frontend có thể viết switch-case rõ ràng
-theo "type", thay vì phải đoán ý nghĩa của một đoạn text thô.
-"""
-
 import re
 import json
 import logging
@@ -37,23 +6,16 @@ from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 
-from app.core.config import settings
 from app.schemas.chat import ChatRequest
 from app.services.business_engine import business_engine
-from app.services.ollama_service import OllamaService
+from app.services.groq_service import GroqService
 
 logger = logging.getLogger("woodhub.chat")
 
 router = APIRouter()
 
-# Khởi tạo service 1 lần duy nhất lúc import module, dùng giá trị từ
-# settings thay vì hardcode -> đổi model/timeout chỉ cần sửa .env.
-ollama_service = OllamaService(
-    model_name=settings.OLLAMA_MODEL,
-    request_timeout=settings.OLLAMA_TIMEOUT,
-    num_predict=settings.OLLAMA_NUM_PREDICT,
-    temperature=settings.OLLAMA_TEMPERATURE,
-)
+# Khởi tạo dịch vụ AI (Groq)
+ai_service = GroqService()
 
 OUT_OF_SCOPE_KEYWORDS = [
     "chính trị", "tổng thống", "bầu cử",
@@ -67,26 +29,34 @@ OUT_OF_SCOPE_MESSAGE = (
     "liên quan đến sản phẩm nội thất, tìm kiếm sản phẩm, giỏ hàng và đơn hàng của WoodHub."
 )
 
-
 def is_out_of_scope(query: str) -> bool:
-    """Chặn sớm các câu hỏi rõ ràng lạc đề, không tốn round-trip tới LLM."""
+    """Chặn sớm các câu hỏi rõ ràng lạc đề."""
     q = query.lower()
     return any(keyword in q for keyword in OUT_OF_SCOPE_KEYWORDS)
 
+def get_clean_keyword(query: str) -> str:
+    """Loại bỏ các từ khóa nhiễu để có chuỗi tìm kiếm (keyword) sạch."""
+    noise_words = [
+        "giá", "bao nhiêu", "cho mình hỏi", "tư vấn", "là gì", 
+        "tìm", "có", "không", "hỏi", "chi tiết", "của"
+    ]
+    clean_q = query.lower()
+    for w in noise_words:
+        clean_q = clean_q.replace(w, " ")
+    return " ".join(clean_q.split())
 
 def get_intent_and_data(req: ChatRequest) -> dict:
-    """
-    Hàm này VẪN đồng bộ (vì business_engine dùng Supabase client đồng bộ),
-    nên LUÔN được gọi qua run_in_threadpool ở route bên dưới, không bao
-    giờ gọi trực tiếp trong hàm async def.
-    """
+    """Phân loại ý định và truy vấn dữ liệu cần thiết."""
     q = req.query.lower()
     result = {"data": None, "suppliers": None}
+    clean_keyword = get_clean_keyword(req.query)
 
-    if "giỏ hàng" in q or "xem giỏ" in q:
+    # 1. INTENT: GIỎ HÀNG
+    if any(k in q for k in ["giỏ hàng", "xem giỏ", "thêm vào", "xóa khỏi"]):
         result["data"] = business_engine.view_cart(req.session_id)
 
-    elif ("cm" in q or "kích thước" in q or "tính" in q) and re.findall(r"\d+", q):
+    # 2. INTENT: TÍNH GIÁ ĐÓNG ĐỒ 3D
+    elif any(k in q for k in ["cm", "kích thước", "tính"]) and re.findall(r"\d+", q):
         numbers = re.findall(r"\d+", q)
         if len(numbers) < 3:
             result["data"] = {
@@ -103,42 +73,40 @@ def get_intent_and_data(req: ChatRequest) -> dict:
                 wood, float(numbers[0]), float(numbers[1]), float(numbers[2])
             )
 
+    # 3. INTENT: TÌM CỬA HÀNG / ĐỊA CHỈ
+    elif any(k in q for k in ["ở đâu", "cửa hàng", "địa chỉ", "chi nhánh", "showroom", "gần đây"]):
+        if req.lat is not None and req.lng is not None:
+            result["suppliers"] = business_engine.find_suppliers_nearby(req.lat, req.lng)
+        else:
+            result["suppliers"] = {
+                "status": "error", 
+                "message": "Không nhận diện được vị trí của bạn để tìm cửa hàng gần nhất."
+            }
+            
+    # 4. INTENT MẶC ĐỊNH: TÌM SẢN PHẨM
     else:
-        result["data"] = business_engine.search_product(req.query)
-
-    if req.lat is not None and req.lng is not None:
-        result["suppliers"] = business_engine.find_suppliers_nearby(req.lat, req.lng)
+        result["data"] = business_engine.search_product(clean_keyword)
 
     return result
 
-
 def sse_event(event_type: str, **payload) -> str:
-    """
-    Đóng gói 1 sự kiện theo đúng chuẩn Server-Sent Events.
-
-    Format chuẩn: 1 dòng bắt đầu bằng "data: ", kết thúc bằng "\n\n" để
-    client biết đây là ranh giới của một message hoàn chỉnh. Payload bên
-    trong là JSON để frontend luôn parse được một cấu trúc thống nhất,
-    thay vì phải suy đoán ý nghĩa của text thô.
-    """
+    """Đóng gói sự kiện theo chuẩn SSE."""
     data = json.dumps({"type": event_type, **payload}, ensure_ascii=False)
     return f"data: {data}\n\n"
 
-
 async def sse_stream(query: str, context: dict):
-    """Wrap luồng text thô từ OllamaService thành các SSE event có cấu trúc."""
+    """Wrap luồng từ GroqService thành các SSE event."""
     try:
-        async for chunk in ollama_service.generate_response_stream(query, context):
+        # SỬA LỖI TẠI ĐÂY: Dùng ai_service thay vì ollama_service
+        async for chunk in ai_service.generate_response_stream(query, context):
             yield sse_event("chunk", content=chunk)
         yield sse_event("done")
     except Exception:
         logger.exception("Lỗi khi stream phản hồi cho query: %s", query)
         yield sse_event("error", message="Hệ thống đang gặp sự cố, vui lòng thử lại sau.")
 
-
 @router.post("/chat")
 async def chat_endpoint(request: ChatRequest):
-    # Chặn sớm câu hỏi ngoài phạm vi -> phản hồi tức thì, không gọi Supabase/Ollama.
     if is_out_of_scope(request.query):
         async def scope_stream():
             yield sse_event("chunk", content=OUT_OF_SCOPE_MESSAGE)
@@ -146,7 +114,6 @@ async def chat_endpoint(request: ChatRequest):
         return StreamingResponse(scope_stream(), media_type="text/event-stream")
 
     try:
-        # Đẩy toàn bộ I/O đồng bộ (Supabase) ra khỏi event loop chính.
         full_result = await run_in_threadpool(get_intent_and_data, request)
     except Exception:
         logger.exception("Lỗi khi truy vấn business_engine cho session_id=%s", request.session_id)
@@ -169,7 +136,5 @@ async def chat_endpoint(request: ChatRequest):
     return StreamingResponse(
         sse_stream(request.query, context),
         media_type="text/event-stream",
-        # Header khuyến nghị cho SSE khi chạy sau reverse proxy (Nginx):
-        # tắt buffering để chunk được đẩy ra ngay, không bị proxy giữ lại.
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
