@@ -29,10 +29,14 @@ OUT_OF_SCOPE_MESSAGE = (
     "liên quan đến sản phẩm nội thất, tìm kiếm sản phẩm, giỏ hàng và đơn hàng của WoodHub."
 )
 
-# Câu thoại cố định khi không tìm thấy sản phẩm để so sánh (Tiết kiệm Token)
 NO_COMPARISON_PRODUCTS_MESSAGE = (
     "Hiện tại WoodHub chưa có sản phẩm của bạn trong kho, "
     "bạn có muốn tham khảo hoặc so sánh sản phẩm khác không?"
+)
+
+NO_LOCATION_MESSAGE = (
+    "WoodHub chưa nhận được định vị của bạn. Bạn vui lòng bật định vị trên thiết bị "
+    "hoặc chia sẻ vị trí để mình tìm showroom/xưởng gần bạn nhất nhé!"
 )
 
 def is_out_of_scope(query: str) -> bool:
@@ -55,12 +59,22 @@ def get_clean_keyword(query: str) -> str:
 def get_intent_and_data(req: ChatRequest) -> dict:
     """Phân loại ý định và truy vấn dữ liệu cần thiết."""
     q = req.query.lower()
-    result = {"data": None, "suppliers": None, "is_comparison_intent": False}
+    result = {
+        "data": None, 
+        "suppliers": None, 
+        "is_comparison_intent": False, 
+        "is_location_intent": False,
+        "is_auto_suggest_location": False
+    }
     clean_keyword = get_clean_keyword(req.query)
 
-    # Đánh dấu nếu khách hàng có ý định so sánh sản phẩm/loại gỗ
+    # Đánh dấu Intent so sánh
     if any(k in q for k in ["so sánh", "khác gì", "đối chiếu", "như thế nào với"]):
         result["is_comparison_intent"] = True
+
+    # Đánh dấu Intent chủ động tìm vị trí cửa hàng / xưởng
+    if any(k in q for k in ["ở đâu", "cửa hàng", "địa chỉ", "chi nhánh", "showroom", "gần đây", "tìm xưởng"]):
+        result["is_location_intent"] = True
 
     # 1. INTENT: GIỎ HÀNG
     if any(k in q for k in ["giỏ hàng", "xem giỏ", "thêm vào", "xóa khỏi"]):
@@ -84,19 +98,17 @@ def get_intent_and_data(req: ChatRequest) -> dict:
                 wood, float(numbers[0]), float(numbers[1]), float(numbers[2])
             )
 
-    # 3. INTENT: TÌM CỬA HÀNG / ĐỊA CHỈ
-    elif any(k in q for k in ["ở đâu", "cửa hàng", "địa chỉ", "chi nhánh", "showroom", "gần đây"]):
-        if req.lat is not None and req.lng is not None:
-            result["suppliers"] = business_engine.find_suppliers_nearby(req.lat, req.lng)
-        else:
-            result["suppliers"] = {
-                "status": "error", 
-                "message": "Không nhận diện được vị trí của bạn để tìm cửa hàng gần nhất."
-            }
+    # 3. INTENT: CHỦ ĐỘNG HỎI CỬA HÀNG (Chỉ gọi DB khi có tọa độ thực tế)
+    elif result["is_location_intent"] and req.lat is not None and req.lng is not None:
+        result["suppliers"] = business_engine.find_suppliers_nearby(req.lat, req.lng)
             
-    # 4. INTENT MẶC ĐỊNH: TÌM SẢN PHẨM (BAO GỒM CẢ TÌM SẢN PHẨM ĐỂ SO SÁNH)
+    # 4. INTENT MẶC ĐỊNH: TÌM SẢN PHẨM + TỰ ĐỘNG GỢI Ý CỬA HÀNG GẦN NHẤT
     else:
         result["data"] = business_engine.search_product(clean_keyword)
+        # NẾU KHÁCH TÌM SẢN PHẨM MÀ CÓ ĐỊNH VỊ -> TỰ ĐỘNG TRA CỨU XƯỞNG GẦN NHẤT ĐỂ GỢI Ý LUÔN
+        if req.lat is not None and req.lng is not None:
+            result["suppliers"] = business_engine.find_suppliers_nearby(req.lat, req.lng)
+            result["is_auto_suggest_location"] = True
 
     return result
 
@@ -132,27 +144,37 @@ async def chat_endpoint(request: ChatRequest):
             detail="Hệ thống dữ liệu tạm thời không khả dụng, vui lòng thử lại sau.",
         )
 
+    # TIẾT KIỆM TOKEN: Khách CHỦ ĐỘNG hỏi vị trí nhưng thiết bị ko bật định vị -> Ngắt luôn
+    if full_result.get("is_location_intent") and (request.lat is None or request.lng is None):
+        async def no_location_stream():
+            yield sse_event("chunk", content=NO_LOCATION_MESSAGE)
+            yield sse_event("done")
+        return StreamingResponse(no_location_stream(), media_type="text/event-stream")
+
     data = full_result["data"]
 
-    # CHIẾN LƯỢC TIẾT KIỆM TOKEN: Nếu là intent so sánh nhưng DB rỗng (None, [] hoặc {}), chặn sớm ngay lập tức
+    # TIẾT KIỆM TOKEN: Khách muốn so sánh nhưng DB sản phẩm rỗng -> Ngắt luôn
     if full_result.get("is_comparison_intent") and (not data or data == [] or data == {}):
         async def no_product_stream():
             yield sse_event("chunk", content=NO_COMPARISON_PRODUCTS_MESSAGE)
             yield sse_event("done")
         return StreamingResponse(no_product_stream(), media_type="text/event-stream")
 
+    # Đóng gói ngữ cảnh gửi sang AI Service
     if isinstance(data, dict) and "estimated_price" in data:
         context = {
             "estimated_price": data.get("estimated_price"),
             "message": data.get("message"),
             "suppliers": full_result.get("suppliers"),
-            "is_comparison": full_result.get("is_comparison_intent")
+            "is_comparison": full_result.get("is_comparison_intent"),
+            "is_auto_suggest_location": full_result.get("is_auto_suggest_location")
         }
     else:
         context = {
             "data": data,
             "suppliers": full_result.get("suppliers"),
-            "is_comparison": full_result.get("is_comparison_intent")
+            "is_comparison": full_result.get("is_comparison_intent"),
+            "is_auto_suggest_location": full_result.get("is_auto_suggest_location")
         }
 
     return StreamingResponse(
