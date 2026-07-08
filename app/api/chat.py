@@ -29,6 +29,12 @@ OUT_OF_SCOPE_MESSAGE = (
     "liên quan đến sản phẩm nội thất, tìm kiếm sản phẩm, giỏ hàng và đơn hàng của WoodHub."
 )
 
+# Câu thoại cố định khi không tìm thấy sản phẩm để so sánh (Tiết kiệm Token)
+NO_COMPARISON_PRODUCTS_MESSAGE = (
+    "Hiện tại WoodHub chưa có sản phẩm của bạn trong kho, "
+    "bạn có muốn tham khảo hoặc so sánh sản phẩm khác không?"
+)
+
 def is_out_of_scope(query: str) -> bool:
     """Chặn sớm các câu hỏi rõ ràng lạc đề."""
     q = query.lower()
@@ -38,7 +44,8 @@ def get_clean_keyword(query: str) -> str:
     """Loại bỏ các từ khóa nhiễu để có chuỗi tìm kiếm (keyword) sạch."""
     noise_words = [
         "giá", "bao nhiêu", "cho mình hỏi", "tư vấn", "là gì", 
-        "tìm", "có", "không", "hỏi", "chi tiết", "của"
+        "tìm", "có", "không", "hỏi", "chi tiết", "của",
+        "so sánh", "khác gì", "đối chiếu", "như thế nào với"
     ]
     clean_q = query.lower()
     for w in noise_words:
@@ -48,8 +55,12 @@ def get_clean_keyword(query: str) -> str:
 def get_intent_and_data(req: ChatRequest) -> dict:
     """Phân loại ý định và truy vấn dữ liệu cần thiết."""
     q = req.query.lower()
-    result = {"data": None, "suppliers": None}
+    result = {"data": None, "suppliers": None, "is_comparison_intent": False}
     clean_keyword = get_clean_keyword(req.query)
+
+    # Đánh dấu nếu khách hàng có ý định so sánh sản phẩm/loại gỗ
+    if any(k in q for k in ["so sánh", "khác gì", "đối chiếu", "như thế nào với"]):
+        result["is_comparison_intent"] = True
 
     # 1. INTENT: GIỎ HÀNG
     if any(k in q for k in ["giỏ hàng", "xem giỏ", "thêm vào", "xóa khỏi"]):
@@ -83,7 +94,7 @@ def get_intent_and_data(req: ChatRequest) -> dict:
                 "message": "Không nhận diện được vị trí của bạn để tìm cửa hàng gần nhất."
             }
             
-    # 4. INTENT MẶC ĐỊNH: TÌM SẢN PHẨM
+    # 4. INTENT MẶC ĐỊNH: TÌM SẢN PHẨM (BAO GỒM CẢ TÌM SẢN PHẨM ĐỂ SO SÁNH)
     else:
         result["data"] = business_engine.search_product(clean_keyword)
 
@@ -97,7 +108,6 @@ def sse_event(event_type: str, **payload) -> str:
 async def sse_stream(query: str, context: dict):
     """Wrap luồng từ GroqService thành các SSE event."""
     try:
-        # SỬA LỖI TẠI ĐÂY: Dùng ai_service thay vì ollama_service
         async for chunk in ai_service.generate_response_stream(query, context):
             yield sse_event("chunk", content=chunk)
         yield sse_event("done")
@@ -124,14 +134,26 @@ async def chat_endpoint(request: ChatRequest):
 
     data = full_result["data"]
 
+    # CHIẾN LƯỢC TIẾT KIỆM TOKEN: Nếu là intent so sánh nhưng DB rỗng (None, [] hoặc {}), chặn sớm ngay lập tức
+    if full_result.get("is_comparison_intent") and (not data or data == [] or data == {}):
+        async def no_product_stream():
+            yield sse_event("chunk", content=NO_COMPARISON_PRODUCTS_MESSAGE)
+            yield sse_event("done")
+        return StreamingResponse(no_product_stream(), media_type="text/event-stream")
+
     if isinstance(data, dict) and "estimated_price" in data:
         context = {
             "estimated_price": data.get("estimated_price"),
             "message": data.get("message"),
             "suppliers": full_result.get("suppliers"),
+            "is_comparison": full_result.get("is_comparison_intent")
         }
     else:
-        context = full_result
+        context = {
+            "data": data,
+            "suppliers": full_result.get("suppliers"),
+            "is_comparison": full_result.get("is_comparison_intent")
+        }
 
     return StreamingResponse(
         sse_stream(request.query, context),

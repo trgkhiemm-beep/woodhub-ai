@@ -18,6 +18,17 @@ class GroqService:
             "Hãy trả lời khách hàng một cách thân thiện, ngắn gọn và chuyên nghiệp. "
             f"Dưới đây là dữ liệu bạn truy xuất được từ hệ thống để trả lời khách: {context}"
         )
+
+        # RÀNG BUỘC CHO INTENT SO SÁNH (TIẾT KIỆM QUOTA & ĐẨY NHANH CHỐT ĐƠN)
+        if context.get("is_comparison") is True:
+            system_prompt += (
+                "\n[YÊU CẦU NGHIÊM NGẶT]: Khách hàng đang muốn so sánh sản phẩm. "
+                "Hãy đọc dữ liệu sản phẩm WoodHub hiện có trong context và đối chiếu với câu hỏi. "
+                "Hãy trả lời NGẮN GỌN NHẤT CÓ THỂ, tập trung làm nổi bật ưu điểm/lợi ích vượt trội "
+                "của sản phẩm WoodHub để kích thích khách hàng mua hàng và chốt đơn ngay. "
+                "Tuyệt đối không giải thích dài dòng dông dài, đi thẳng vào cốt lõi."
+            )
+
         return [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": query}
@@ -37,7 +48,8 @@ class GroqService:
             )
             
             # Hứng từng mẩu dữ liệu (chunk) và nhả ra
-            async for chunk in stream:
+            async_stream = stream
+            async for chunk in async_stream:
                 if chunk.choices[0].delta.content is not None:
                     yield chunk.choices[0].delta.content
                     
@@ -58,4 +70,4 @@ class GroqService:
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"Lỗi Groq Service (Full): {e}")
-            return "Xin lỗi, hệ thống đang gặp sự cố."
+            return "Xin lỗi, hệ thống AI đang bảo trì. Vui lòng thử lại sau!"
