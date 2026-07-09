@@ -72,7 +72,7 @@ def get_intent_and_data(req: ChatRequest) -> dict:
     if any(k in q for k in ["so sánh", "khác gì", "đối chiếu", "như thế nào với"]):
         result["is_comparison_intent"] = True
 
-    # Đánh dấu Intent chủ động tìm vị trí cửa hàng / xưởng
+    # Đánh dấu Intent KHÁCH CHỦ ĐỘNG hỏi vị trí showroom / xưởng
     if any(k in q for k in ["ở đâu", "cửa hàng", "địa chỉ", "chi nhánh", "showroom", "gần đây", "tìm xưởng"]):
         result["is_location_intent"] = True
 
@@ -80,13 +80,14 @@ def get_intent_and_data(req: ChatRequest) -> dict:
     if any(k in q for k in ["giỏ hàng", "xem giỏ", "thêm vào", "xóa khỏi"]):
         result["data"] = business_engine.view_cart(req.session_id)
 
-    # 2. INTENT: TÍNH GIÁ ĐÓNG ĐỒ 3D
-    elif any(k in q for k in ["cm", "kích thước", "tính"]) and re.findall(r"\d+", q):
+    # 2. INTENT: TÍNH GIÁ ĐÓNG ĐỒ CUSTOM 3D -> GỢI Ý XƯỞNG PHÙ HỢP TẠI ĐÂY
+    elif (any(k in q for k in ["cm", "kích thước", "tính", "đặt làm", "đóng theo yêu cầu", "custom"]) 
+          and re.findall(r"\d+", q)):
         numbers = re.findall(r"\d+", q)
         if len(numbers) < 3:
             result["data"] = {
                 "status": "error",
-                "message": "Vui lòng cung cấp đủ 3 kích thước (dài x rộng x cao), ví dụ: 100x50x30cm.",
+                "message": "Vui lòng cung cấp đủ 3 kích thước (dài x rộng x cao), ví dụ: 100x50x30cm để mình tính giá gia công.",
             }
         else:
             wood = "sồi"
@@ -94,21 +95,23 @@ def get_intent_and_data(req: ChatRequest) -> dict:
                 if w_type in q:
                     wood = w_type
                     break
+            # Tính toán giá đóng đồ custom dựa trên kích thước
             result["data"] = business_engine.estimate_custom_3d(
                 wood, float(numbers[0]), float(numbers[1]), float(numbers[2])
             )
+            
+            # ĐỀ XUẤT XƯỞNG PHÙ HỢP CHO ĐƠN CUSTOM: Nếu có định vị, lấy thông tin xưởng sản xuất gần nhất
+            if req.lat is not None and req.lng is not None:
+                result["suppliers"] = business_engine.find_suppliers_nearby(req.lat, req.lng)
+                result["is_auto_suggest_location"] = True
 
-    # 3. INTENT: CHỦ ĐỘNG HỎI CỬA HÀNG (Chỉ gọi DB khi có tọa độ thực tế)
+    # 3. INTENT: KHÁCH CHỦ ĐỘNG HỎI CỬA HÀNG (Chỉ gọi DB khi có tọa độ thực tế)
     elif result["is_location_intent"] and req.lat is not None and req.lng is not None:
         result["suppliers"] = business_engine.find_suppliers_nearby(req.lat, req.lng)
             
-    # 4. INTENT MẶC ĐỊNH: TÌM SẢN PHẨM + TỰ ĐỘNG GỢI Ý CỬA HÀNG GẦN NHẤT
+    # 4. INTENT MẶC ĐỊNH: TÌM SẢN PHẨM THƯỜNG (Hoàn toàn tách biệt, không tự động chèn địa chỉ xưởng nữa)
     else:
         result["data"] = business_engine.search_product(clean_keyword)
-        # NẾU KHÁCH TÌM SẢN PHẨM MÀ CÓ ĐỊNH VỊ -> TỰ ĐỘNG TRA CỨU XƯỞNG GẦN NHẤT ĐỂ GỢI Ý LUÔN
-        if req.lat is not None and req.lng is not None:
-            result["suppliers"] = business_engine.find_suppliers_nearby(req.lat, req.lng)
-            result["is_auto_suggest_location"] = True
 
     return result
 

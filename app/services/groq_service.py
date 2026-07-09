@@ -28,13 +28,13 @@ class GroqService:
                 "Tuyệt đối không giải thích dài dòng dông dài, đi thẳng vào cốt lõi."
             )
 
-        # RÀNG BUỘC CHO TÍNH NĂNG TỰ ĐỘNG GỢI Ý SHOWROOM/XƯỞNG SAU KHI XEM ĐỒ
+        # RÀNG BUỘC CHO TÍNH NĂNG ĐIỀU HƯỚNG ĐẶT ĐƠN CUSTOM (ĐÚNG THỜI ĐIỂM)
         if context.get("is_auto_suggest_location") is True and context.get("suppliers") is not None:
             system_prompt += (
-                "\n[YÊU CẦU ĐIỀU HƯỚNG O2O]: Sau khi bạn tư vấn thông tin sản phẩm từ dữ liệu hệ thống xong, "
-                "hãy nhìn vào danh sách xưởng/showroom gần nhất trong mục 'suppliers'. "
-                "Hãy khéo léo chèn thêm 1 câu ngắn gọn ở cuối cùng để giới thiệu showroom/xưởng gần khách hàng nhất "
-                "và mời họ qua trải nghiệm sản phẩm trực tiếp (Ví dụ: 'Sản phẩm này hiện đang có sẵn tại chi nhánh X cách bạn chỉ Y km, mời bạn ghé xem qua nhé!')."
+                "\n[YÊU CẦU ĐIỀU HƯỚNG ĐƠN CUSTOM]: Khách hàng đang muốn đặt làm/tính giá đồ nội thất custom theo yêu cầu. "
+                "Sau khi thông báo mức giá ước tính từ dữ liệu hệ thống, hãy nhìn vào danh sách xưởng gần nhất trong mục 'suppliers'. "
+                "Hãy khéo léo chèn thêm 1 câu ngắn gọn ở cuối cùng để thông báo rằng xưởng sản xuất của WoodHub tại [Tên Xưởng/Showroom] "
+                "cách họ [X] km đã sẵn sàng tiếp nhận gia công kích thước này, và mời họ đặt đơn sản xuất ngay lập tức."
             )
 
         return [
