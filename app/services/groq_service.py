@@ -11,20 +11,20 @@ class GroqService:
         self.model_name = settings.GROQ_MODEL
 
     def _build_prompt(self, query: str, context: dict) -> list:
-        """Xây dựng prompt hệ thống với luật chặn cứng từ ngữ màu mè và điều hướng danh mục Cửa hàng"""
+        """Xây dựng prompt hệ thống chặn đứng ảo tưởng và chỉ định câu dẫn siêu ngắn"""
         system_prompt = (
             "Bạn là trợ lý ảo bán hàng chuyên nghiệp của WoodHub. "
             "Nhiệm vụ của bạn là đọc dữ liệu ngữ cảnh (context) từ hệ thống để trả lời khách hàng."
         )
 
-        # CẬP NHẬT LUẬT NGHIÊM NGẶT KHI TRUY VẤN CÓ SẢN PHẨM 
+        # CHẶN CỨNG CHỈ TRẢ VỀ CÂU DẪN SIÊU NGẮN KHI CÓ SẢN PHẨM REAL-TIME
         product_data = context.get("data")
         if product_data and isinstance(product_data, list) and len(product_data) > 0:
             system_prompt += (
                 "\n[YÊU CẦU TỐI THƯỢNG]: Hệ thống đã tìm thấy sản phẩm thực tế trong database. "
                 "Bạn KHÔNG ĐƯỢC PHÉP tự bịa thêm sản phẩm, KHÔNG ĐƯỢC liệt kê lại tên hay giá tiền bằng văn bản text. "
-                "Bạn CHỈ ĐƯỢC PHÉP trả về duy nhất đoạn văn bản sau đây, không thêm bớt bất kỳ từ nào, giữ đúng định dạng xuống dòng: "
-                "'\nMình gợi ý vài mẫu phù hợp nhé:\n\n*(Lưu ý: Các sản phẩm trên chưa phải tất cả sản phẩm mà WoodHub có, bạn có thể tham khảo thêm tại mục Cửa hàng)*'"
+                "Bạn CHỈ ĐƯỢC PHÉP trả về duy nhất câu thoại sau đây, không thêm bớt bất kỳ từ hay ký tự nào khác: "
+                "\"Mình gợi ý vài mẫu phù hợp nhé:\""
             )
         elif product_data == []:
             system_prompt += (
@@ -50,7 +50,7 @@ class GroqService:
             stream = await self.client.chat.completions.create(
                 messages=messages,
                 model=self.model_name,
-                temperature=0.1,  # Đảm bảo AI tuân thủ tuyệt đối cấu trúc văn bản mẫu
+                temperature=0.0,  # Hạ xuống 0.0 để triệt tiêu hoàn toàn tính sáng tạo ngẫu nhiên của AI
                 stream=True,
             )
             async for chunk in stream:
