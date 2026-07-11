@@ -40,6 +40,7 @@ class BusinessEngine:
         [MỚI] Tìm kiếm sản phẩm tương đối theo từ khóa (Fuzzy Search).
         Tuân thủ nghiêm ngặt giới hạn tối đa 5 sản phẩm khớp nhất, không tự bịa dữ liệu.
         Trả về kiểu dữ liệu 'list' sạch từ DB để đồng bộ với cơ chế Short-Circuit chặn AI.
+        Đã fix lỗi 42703 bằng Resource Embedding để lấy price từ product_variants.
         """
         if not self.supabase:
             logger.error("Hủy truy vấn: Supabase Client chưa được khởi tạo.")
@@ -49,15 +50,34 @@ class BusinessEngine:
             return []
 
         try:
-            # Thực hiện truy vấn tương đối (ILike) không phân biệt hoa thường
-            # Đồng bộ cấu trúc cột mới bao gồm category_id và price để vẽ giao diện UI Card phía Frontend
+            # 1. Truy vấn DB: Thay vì lấy cột price trực tiếp, lấy lồng qua product_variants
             response = self.supabase.table("products") \
-                .select("id, name, product_id, category_id, supplier_id, material_id, description, status, price") \
+                .select("id, name, product_id, category_id, supplier_id, material_id, description, status, product_variants(price)") \
                 .ilike("name", f"%{keyword.strip()}%") \
                 .limit(5) \
                 .execute()
                 
-            return response.data if response.data else []
+            raw_data = response.data if response.data else []
+            processed_data = []
+
+            # 2. Làm phẳng dữ liệu (Flattening) để Frontend và AI đọc mượt mà
+            for product in raw_data:
+                variants = product.get("product_variants")
+                
+                # Trích xuất giá trị price từ biến thể đầu tiên
+                if variants and isinstance(variants, list) and len(variants) > 0:
+                    product["price"] = variants[0].get("price", 0)
+                else:
+                    # Rủi ro an toàn (Fallback): Nếu sản phẩm chưa có biến thể, gán giá bằng 0
+                    product["price"] = 0 
+
+                # Xóa key product_variants để object gọn gàng và giống hệt format cũ
+                if "product_variants" in product:
+                    del product["product_variants"]
+
+                processed_data.append(product)
+
+            return processed_data
 
         except Exception as e:
             logger.error(f"Lỗi ngoại lệ khi thực hiện Fuzzy Search trên bảng products: {str(e)}")
