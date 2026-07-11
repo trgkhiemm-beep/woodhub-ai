@@ -121,14 +121,22 @@ def sse_event(event_type: str, **payload) -> str:
     return f"data: {data}\n\n"
 
 async def sse_stream(query: str, context: dict):
-    """Wrap luồng từ GroqService thành các SSE event."""
+    """
+    Stream dữ liệu trực tiếp vào Response Body để debug.
+    """
+    # [DEBUG] Gửi mảng dữ liệu sản phẩm trực tiếp vào response stream
+    if context.get("data") and isinstance(context["data"], list):
+        # Ép kiểu dữ liệu sang JSON string để hiển thị rõ ràng trong Body
+        debug_payload = json.dumps(context["data"], ensure_ascii=False)
+        yield f"data: {{\"type\": \"debug_data\", \"payload\": {debug_payload}}}\n\n"
+
     try:
         async for chunk in ai_service.generate_response_stream(query, context):
-            yield sse_event("chunk", content=chunk)
-        yield sse_event("done")
-    except Exception:
-        logger.exception("Lỗi khi stream phản hồi cho query: %s", query)
-        yield sse_event("error", message="Hệ thống đang gặp sự cố, vui lòng thử lại sau.")
+            yield f"data: {{\"type\": \"chunk\", \"content\": \"{chunk}\"}}\n\n"
+        
+        yield "data: {\"type\": \"done\"}\n\n"
+    except Exception as e:
+        yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\"}}\n\n"
 
 @router.post("/chat")
 async def chat_endpoint(request: ChatRequest):
