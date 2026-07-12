@@ -122,14 +122,16 @@ def sse_event(event_type: str, **payload) -> str:
 
 async def sse_stream(query: str, context: dict):
     """
-    Stream dữ liệu trực tiếp vào Response Body để debug.
+    Stream dữ liệu để Debug: Đẩy cả data sản phẩm và text của AI ra Response.
     """
-    # [DEBUG] Gửi mảng dữ liệu sản phẩm trực tiếp vào response stream
-    if context.get("data") and isinstance(context["data"], list):
-        # Ép kiểu dữ liệu sang JSON string để hiển thị rõ ràng trong Body
-        debug_payload = json.dumps(context["data"], ensure_ascii=False)
-        yield f"data: {{\"type\": \"debug_data\", \"payload\": {debug_payload}}}\n\n"
+    
+    # 1. Đẩy DỮ LIỆU SẢN PHẨM vào stream đầu tiên (nếu có)
+    if context and "data" in context and isinstance(context["data"], list):
+        products_json = json.dumps(context["data"], ensure_ascii=False)
+        # Gửi dòng này để bạn thấy raw data trong tab Network -> Response
+        yield f"data: {{\"type\": \"debug_data\", \"payload\": {products_json}}}\n\n"
 
+    # 2. Stream câu trả lời của AI
     try:
         async for chunk in ai_service.generate_response_stream(query, context):
             yield f"data: {{\"type\": \"chunk\", \"content\": \"{chunk}\"}}\n\n"
