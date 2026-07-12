@@ -1,5 +1,6 @@
 import math
 import logging
+import re
 from app.core.database import supabase
 
 logger = logging.getLogger("woodhub.business_engine")
@@ -37,22 +38,54 @@ class BusinessEngine:
 
     def search_product(self, keyword: str) -> list:
         """
-        Tìm kiếm sản phẩm theo từ khóa.
-        Sử dụng Resource Embedding để lấy price từ product_variants.
-        Đã loại bỏ các cột không tồn tại và không cần thiết để tránh lỗi 42703.
+        Tìm kiếm sản phẩm theo từ khóa (Tích hợp Bộ lọc NLP Stop-words thủ công).
+        Xử lý cắt gọt câu dài để lấy chính xác danh từ tìm kiếm.
         """
+        import re 
+
         if not self.supabase:
             logger.error("Hủy truy vấn: Supabase Client chưa được khởi tạo.")
             return []
             
-        if not keyword or len(keyword.strip()) < 2:
+        if not keyword:
             return []
 
+        # ==========================================
+        # LỚP 2: TIỀN XỬ LÝ & BÓC TÁCH TỪ KHÓA (NLP)
+        # ==========================================
+        clean_text = keyword.lower()
+        
+        # 1. Xóa các dấu câu đặc biệt (thay bằng khoảng trắng)
+        clean_text = re.sub(r'[.,!?]', ' ', clean_text)
+        
+        # 2. Danh sách cụm từ rác (Stop-phrases) xếp từ dài đến ngắn để tránh cắt nhầm
+        stop_phrases = [
+            "tôi muốn mua", "mình muốn mua", "cho mình xem", "cho xem",
+            "có bán", "mình cần tìm", "tôi cần tìm", "tôi tìm", "tôi cần",
+            "chào shop", "shop ơi", "xin chào", "cửa hàng",
+            "cái", "chiếc", "bộ", "ạ", "nhỉ", "không", "nhé", "có"
+        ]
+        
+        # 3. Kỹ thuật đệm khoảng trắng (Padding Space): 
+        # Đệm 2 đầu để tìm chính xác từ độc lập, không cắt nhầm chữ bên trong từ khác.
+        padded_text = f" {clean_text} "
+        for phrase in stop_phrases:
+            padded_text = padded_text.replace(f" {phrase} ", " ")
+        
+        # 4. Gom các khoảng trắng thừa lại thành 1 và cắt sạch 2 đầu
+        final_keyword = re.sub(r'\s+', ' ', padded_text).strip()
+
+        # 5. Rào chắn (Guard Clause): Nếu sau khi cắt gọt chuỗi bị rỗng -> Bỏ qua an toàn
+        if len(final_keyword) < 2:
+            return []
+
+        # ==========================================
+        # TRUY VẤN DATABASE SUPABASE VỚI TỪ KHÓA ĐÃ LỌC
+        # ==========================================
         try:
-            # Truy vấn tinh giản: Chỉ lấy đúng những gì cần thiết cho UI
             response = self.supabase.table("products") \
                 .select("id, name, description, status, product_variants(price)") \
-                .ilike("name", f"%{keyword.strip()}%") \
+                .ilike("name", f"%{final_keyword}%") \
                 .limit(5) \
                 .execute()
                 
@@ -60,16 +93,13 @@ class BusinessEngine:
             processed_data = []
 
             for product in raw_data:
-                # Trích xuất price từ mảng lồng product_variants
                 variants = product.get("product_variants")
                 
-                # Logic lấy giá an toàn: ưu tiên biến thể đầu tiên, fallback về 0
                 if variants and isinstance(variants, list) and len(variants) > 0:
                     product["price"] = variants[0].get("price", 0)
                 else:
                     product["price"] = 0 
 
-                # Xóa key thừa sau khi đã map xong dữ liệu
                 if "product_variants" in product:
                     del product["product_variants"]
 

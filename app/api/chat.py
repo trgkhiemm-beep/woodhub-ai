@@ -10,6 +10,9 @@ from app.schemas.chat import ChatRequest
 from app.services.business_engine import business_engine
 from app.services.groq_service import GroqService
 
+GREETING_LIST = ["chào shop", "shop ơi", "xin chào", "hello", "chào bạn", "hi", "alo", "có ai không", "chào"]
+GREETING_RESPONSE = "chào bạn tôi là trợ lý của woodhub, bạn có nhu cầu tìm kiếm hoặc tham khảo sản phẩm nội thất nào cứ việc nhắn tin cho tôi biết nhé"
+
 logger = logging.getLogger("woodhub.chat")
 
 router = APIRouter()
@@ -122,25 +125,35 @@ def sse_event(event_type: str, **payload) -> str:
 
 async def sse_stream(query: str, context: dict):
     """
-    Stream dữ liệu: AI text trước, Data sau.
+    Stream dữ liệu theo thứ tự nghiêm ngặt:
+    1. AI Stream (Text phản hồi)
+    2. Data (Sản phẩm)
+    3. Done (Kết thúc)
     """
+    clean_query = re.sub(r'[.,!?]+$', '', query.lower().strip())
+
+    if clean_query in GREETING_LIST:
+        yield f"data: {{\"type\": \"chunk\", \"content\": \"{GREETING_RESPONSE}\"}}\n\n"
+        yield "data: {\"type\": \"done\"}\n\n"
+        return
     
-    # 1. Chạy loop stream câu trả lời của AI trước
+    # 1. Gửi Stream phản hồi của AI trước (Ví dụ: "Mình gợi ý vài mẫu phù hợp nhé: ...")
     try:
         async for chunk in ai_service.generate_response_stream(query, context):
             yield f"data: {{\"type\": \"chunk\", \"content\": \"{chunk}\"}}\n\n"
     except Exception as e:
         yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\"}}\n\n"
-        return # Nếu lỗi thì dừng luồng luôn
+        return 
 
-    # 2. Sau khi AI stream xong toàn bộ text, mới gửi data sản phẩm xuống
-    if context and "data" in context and isinstance(context["data"], list):
+    # 2. Sau khi AI trả lời xong, mới gửi Dữ liệu sản phẩm (nếu có)
+    # Lúc này người dùng đã thấy text của AI rồi mới thấy cục dữ liệu này
+    if context and context.get("data") and isinstance(context["data"], list):
         products_json = json.dumps(context["data"], ensure_ascii=False)
         yield f"data: {{\"type\": \"debug_data\", \"payload\": {products_json}}}\n\n"
 
-    # 3. Cuối cùng mới báo done
+    # 3. Cuối cùng mới báo hoàn thành
     yield "data: {\"type\": \"done\"}\n\n"
-
+    
 @router.post("/chat")
 async def chat_endpoint(request: ChatRequest):
     if is_out_of_scope(request.query):
