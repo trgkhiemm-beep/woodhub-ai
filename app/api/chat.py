@@ -105,7 +105,7 @@ def get_intent_and_data(req: ChatRequest) -> dict:
             
             # ĐỀ XUẤT XƯỞNG PHÙ HỢP CHO ĐƠN CUSTOM: Nếu có định vị, lấy thông tin xưởng sản xuất gần nhất
             if req.lat is not None and req.lng is not None:
-                result["suppliers"] = business_engine.find_suppliers_nearby(req.lat, req.lng)
+                result["suppliers"] = business_engine.find_stores(keyword=req.query, lat=req.lat, lng=req.lng)
                 result["is_auto_suggest_location"] = True
 
     # 3. INTENT: KHÁCH CHỦ ĐỘNG HỎI CỬA HÀNG (Chỉ gọi DB khi có tọa độ thực tế)
