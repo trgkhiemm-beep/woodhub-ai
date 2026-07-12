@@ -122,23 +122,24 @@ def sse_event(event_type: str, **payload) -> str:
 
 async def sse_stream(query: str, context: dict):
     """
-    Stream dữ liệu để Debug: Đẩy cả data sản phẩm và text của AI ra Response.
+    Stream dữ liệu: AI text trước, Data sau.
     """
     
-    # 1. Đẩy DỮ LIỆU SẢN PHẨM vào stream đầu tiên (nếu có)
-    if context and "data" in context and isinstance(context["data"], list):
-        products_json = json.dumps(context["data"], ensure_ascii=False)
-        # Gửi dòng này để bạn thấy raw data trong tab Network -> Response
-        yield f"data: {{\"type\": \"debug_data\", \"payload\": {products_json}}}\n\n"
-
-    # 2. Stream câu trả lời của AI
+    # 1. Chạy loop stream câu trả lời của AI trước
     try:
         async for chunk in ai_service.generate_response_stream(query, context):
             yield f"data: {{\"type\": \"chunk\", \"content\": \"{chunk}\"}}\n\n"
-        
-        yield "data: {\"type\": \"done\"}\n\n"
     except Exception as e:
         yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\"}}\n\n"
+        return # Nếu lỗi thì dừng luồng luôn
+
+    # 2. Sau khi AI stream xong toàn bộ text, mới gửi data sản phẩm xuống
+    if context and "data" in context and isinstance(context["data"], list):
+        products_json = json.dumps(context["data"], ensure_ascii=False)
+        yield f"data: {{\"type\": \"debug_data\", \"payload\": {products_json}}}\n\n"
+
+    # 3. Cuối cùng mới báo done
+    yield "data: {\"type\": \"done\"}\n\n"
 
 @router.post("/chat")
 async def chat_endpoint(request: ChatRequest):
