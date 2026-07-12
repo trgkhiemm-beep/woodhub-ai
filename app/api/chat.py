@@ -123,35 +123,63 @@ def sse_event(event_type: str, **payload) -> str:
     data = json.dumps({"type": event_type, **payload}, ensure_ascii=False)
     return f"data: {data}\n\n"
 
+def is_store_intent(query: str):
+    keywords = ["tìm xưởng", "xưởng", "cửa hàng", "showroom", "gần đây"]
+    return any(k in query.lower() for k in keywords)
+
 async def sse_stream(query: str, context: dict):
-    """
-    Stream dữ liệu theo thứ tự nghiêm ngặt:
-    1. AI Stream (Text phản hồi)
-    2. Data (Sản phẩm)
-    3. Done (Kết thúc)
-    """
+    # 1. Làm sạch câu lệnh
     clean_query = re.sub(r'[.,!?]+$', '', query.lower().strip())
 
+    # 2. Đánh chặn chào hỏi (Ưu tiên cao nhất)
     if clean_query in GREETING_LIST:
         yield f"data: {{\"type\": \"chunk\", \"content\": \"{GREETING_RESPONSE}\"}}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
         return
+
+    # 3. Xác định ý định & Chuẩn bị dữ liệu (Trước khi stream AI)
+    is_store = is_store_intent(query)
+    has_product_search = context.get("has_product_search", False)
+    user_lat = context.get("lat")
+    user_lng = context.get("lng")
     
-    # 1. Gửi Stream phản hồi của AI trước (Ví dụ: "Mình gợi ý vài mẫu phù hợp nhé: ...")
+    # Lấy dữ liệu sẵn sàng để AI có thể "biết" và phản hồi
+    result_data = None
+    data_type = "debug_data" # mặc định
+
+    if is_store and not has_product_search:
+        # LUỒNG 1: CHỈ TÌM XƯỞNG
+        stores = business_engine.find_stores(keyword=query, lat=user_lat, lng=user_lng)
+        result_data = {"type": "store_data", "payload": stores}
+        data_type = "store_data"
+    elif is_store and has_product_search:
+        # LUỒNG 2: HỖN HỢP
+        products = business_engine.search_product(query)
+        stores = business_engine.find_stores(keyword=query, lat=user_lat, lng=user_lng)
+        result_data = {"type": "mixed_data", "products": products, "stores": stores}
+        data_type = "mixed_data"
+    else:
+        # TÌM SẢN PHẨM THÔNG THƯỜNG
+        products = business_engine.search_product(query)
+        result_data = {"type": "debug_data", "payload": products}
+        data_type = "debug_data"
+
+    # 4. Stream Phản hồi AI (AI nhận dữ liệu qua context để trả lời tự nhiên)
+    context["current_results"] = result_data # Truyền vào để AI biết kết quả
     try:
         async for chunk in ai_service.generate_response_stream(query, context):
             yield f"data: {{\"type\": \"chunk\", \"content\": \"{chunk}\"}}\n\n"
     except Exception as e:
         yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\"}}\n\n"
-        return 
+        # Dù lỗi vẫn cần đóng stream
+        yield "data: {\"type\": \"done\"}\n\n"
+        return
 
-    # 2. Sau khi AI trả lời xong, mới gửi Dữ liệu sản phẩm (nếu có)
-    # Lúc này người dùng đã thấy text của AI rồi mới thấy cục dữ liệu này
-    if context and context.get("data") and isinstance(context["data"], list):
-        products_json = json.dumps(context["data"], ensure_ascii=False)
-        yield f"data: {{\"type\": \"debug_data\", \"payload\": {products_json}}}\n\n"
+    # 5. Gửi dữ liệu (Sau khi AI trả lời xong)
+    json_payload = json.dumps(result_data, ensure_ascii=False)
+    yield f"data: {{\"type\": \"{data_type}\", \"payload\": {json_payload}}}\n\n"
 
-    # 3. Cuối cùng mới báo hoàn thành
+    # 6. Cuối cùng mới báo hoàn thành
     yield "data: {\"type\": \"done\"}\n\n"
     
 @router.post("/chat")

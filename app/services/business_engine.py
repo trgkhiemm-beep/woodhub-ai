@@ -190,95 +190,62 @@ class BusinessEngine:
         total = sum(float(item["price_at_addition"]) * item["quantity"] for item in res.data)
         return {"status": "success", "items": res.data, "total": total}
 
-    def find_suppliers_nearby(self, lat: float, lng: float, max_dist_km: float = 50.0) -> list:
+    def find_stores(self, keyword: str = None, lat: float = None, lng: float = None, limit: int = 5) -> list:
         """
-        Tìm kiếm tối đa 5 xưởng/showroom gần vị trí người dùng nhất trong bán kính cho phép.
-        Sử dụng kỹ thuật Supabase Resource Embedding để kết hợp lấy tên nhà cung cấp từ bảng 'suppliers'.
-        Mã hóa an toàn chống crash dữ liệu khi tọa độ trống (Null).
+        Phương thức tìm kiếm lai (Hybrid Search):
+        - Nếu có lat/lng: Tìm theo tọa độ (Gần nhất).
+        - Nếu có keyword: Tìm theo Tên xưởng (business_name) hoặc Địa chỉ (ward, district, city).
         """
-        import math
-
         if not self.supabase:
-            logger.error("Supabase Client chưa được khởi tạo.")
             return []
 
         try:
-            # 1. Thực hiện một truy vấn duy nhất quét bảng stores và nhúng dữ liệu từ bảng suppliers
-            response = self.supabase.table("stores") \
-                .select(
-                    "id, address, ward, district, city, latitude, longitude, phone, supplier_type, supplier_id, "
-                    "suppliers(business_name)"
-                ) \
-                .execute()
+            # 1. Khởi tạo query base
+            query = self.supabase.table("stores").select(
+                "id, address, ward, district, city, latitude, longitude, phone, supplier_id, suppliers(business_name)"
+            )
+
+            # 2. Xử lý Logic Tìm kiếm
+            if lat and lng:
+                # Nếu có tọa độ -> Lấy toàn bộ (hoặc một subset lớn) để client tính khoảng cách hoặc filter sơ bộ
+                # Lưu ý: Supabase không hỗ trợ PostGIS trực tiếp qua SDK nên ta lấy tất cả và lọc bằng Python (như cũ)
+                response = query.execute()
+                data = response.data if response.data else []
+                
+                # Tính khoảng cách và gắn vào object
+                for item in data:
+                    item["distance"] = self._haversine_distance(lat, lng, item.get("latitude", 0), item.get("longitude", 0))
+                
+                # Sắp xếp theo khoảng cách
+                data.sort(key=lambda x: x["distance"])
             
-            stores_data = response.data if response.data else []
-            nearby_suppliers = []
+            elif keyword:
+                # Tìm theo từ khóa (Tên xưởng hoặc Địa chỉ)
+                # Dùng .or_ để tìm trên nhiều cột cùng lúc
+                search_term = f"%{keyword}%"
+                response = query.or_(f"address.ilike.{search_term},ward.ilike.{search_term},district.ilike.{search_term},city.ilike.{search_term}") \
+                                .execute()
+                data = response.data if response.data else []
+            else:
+                return []
 
-            # 2. Quét qua danh sách các cửa hàng để tính toán khoảng cách hình học
-            for store in stores_data:
-                store_lat = store.get("latitude")
-                store_lng = store.get("longitude")
+            # 3. Chuẩn hóa format trả về (Gộp tên Supplier vào)
+            results = []
+            for item in data[:limit]:
+                supplier_obj = item.get("suppliers")
+                biz_name = supplier_obj[0].get("business_name") if isinstance(supplier_obj, list) and supplier_obj else "Xưởng WoodHub"
                 
-                # EDGE CASE: Bỏ qua an toàn nếu bản ghi store bị Null tọa độ địa lý trên DB
-                if store_lat is None or store_lng is None:
-                    continue
-
-                # 3. Thuật toán hình học Haversine tính khoảng cách bề mặt cầu (Đơn vị: km)
-                # Bán kính Trái Đất trung bình = 6371.0 km
-                R = 6371.0
-                
-                phi1 = math.radians(lat)
-                phi2 = math.radians(store_lat)
-                delta_phi = math.radians(store_lat - lat)
-                delta_lambda = math.radians(store_lng - lng)
-                
-                a = math.sin(delta_phi / 2.0) ** 2 + \
-                    math.cos(phi1) * math.cos(phi2) * \
-                    math.sin(delta_lambda / 2.0) ** 2
-                
-                c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
-                distance = R * c
-
-                # Lọc các cửa hàng nằm trong bán kính cấu hình (mặc định 50km)
-                if distance <= max_dist_km:
-                    # 4. Trích xuất thông tin tên xưởng một cách an toàn từ object lồng nhau (Embedding)
-                    supplier_obj = store.get("suppliers")
-                    business_name = "Xưởng WoodHub"  # Giá trị dự phòng (Fallback) nếu quan hệ bị mồ côi
-                    
-                    if isinstance(supplier_obj, dict):
-                        business_name = supplier_obj.get("business_name") or "Xưởng WoodHub"
-                    elif isinstance(supplier_obj, list) and len(supplier_obj) > 0:
-                        # Trường hợp cấu hình DB trả ra dạng mảng
-                        business_name = supplier_obj[0].get("business_name") or "Xưởng WoodHub"
-
-                    # 5. Chuẩn hóa chuỗi địa chỉ hành chính hiển thị trực quan cho người dùng/AI
-                    addr_parts = [
-                        store.get("address"),
-                        store.get("ward"),
-                        store.get("district"),
-                        store.get("city")
-                    ]
-                    full_address = ", ".join([p.strip() for p in addr_parts if p and p.strip()])
-
-                    # 6. Map dữ liệu đầu ra chuẩn format context cũ để an toàn cho AI và Frontend
-                    nearby_suppliers.append({
-                        "id": store.get("id"),
-                        "supplier_name": business_name,
-                        "address": full_address if full_address else "Địa chỉ đang cập nhật",
-                        "phone": store.get("phone") or "Chưa cập nhật",
-                        "lat": float(store_lat),
-                        "lng": float(store_lng),
-                        "distance": round(distance, 2)  # Làm tròn 2 chữ số thập phân
-                    })
-
-            # 7. Sắp xếp danh sách theo khoảng cách tăng dần (gần nhất xếp lên đầu)
-            nearby_suppliers.sort(key=lambda x: x["distance"])
-            
-            # Giới hạn nghiêm ngặt tối đa 5 phần tử để tiết kiệm Token Context
-            return nearby_suppliers[:5]
+                results.append({
+                    "id": item.get("id"),
+                    "supplier_name": biz_name,
+                    "address": f"{item.get('address')}, {item.get('ward')}, {item.get('district')}, {item.get('city')}",
+                    "distance": item.get("distance", "N/A"),
+                    "type": "store"
+                })
+            return results
 
         except Exception as e:
-            logger.error(f"Lỗi hệ thống khi tìm kiếm xưởng gần nhất: {str(e)}")
+            logger.error(f"Lỗi tìm kiếm cửa hàng: {str(e)}")
             return []
 
     def estimate_custom_3d(self, wood_type: str, w: float, h: float, d: float) -> dict:
