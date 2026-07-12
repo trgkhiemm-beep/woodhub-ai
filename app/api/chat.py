@@ -110,7 +110,7 @@ def get_intent_and_data(req: ChatRequest) -> dict:
 
     # 3. INTENT: KHÁCH CHỦ ĐỘNG HỎI CỬA HÀNG (Chỉ gọi DB khi có tọa độ thực tế)
     elif result["is_location_intent"] and req.lat is not None and req.lng is not None:
-        result["suppliers"] = business_engine.find_suppliers_nearby(req.lat, req.lng)
+        result["suppliers"] = business_engine.find_stores(keyword=req.query, lat=req.lat, lng=req.lng)
             
     # 4. INTENT MẶC ĐỊNH: TÌM SẢN PHẨM THƯỜNG (Hoàn toàn tách biệt, không tự động chèn địa chỉ xưởng nữa)
     else:
