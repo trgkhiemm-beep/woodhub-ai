@@ -12,9 +12,6 @@ class GroqService:
         self.model_name = settings.GROQ_MODEL
 
     async def extract_search_intent(self, query: str) -> dict:
-        """
-        Sử dụng LLM để bóc tách ý định tìm kiếm sản phẩm và giá cả.
-        """
         system_prompt = (
             "Bạn là trợ lý bóc tách dữ liệu JSON. Đọc tin nhắn và trích xuất thông tin tìm kiếm.\n"
             "Quy tắc quy đổi:\n"

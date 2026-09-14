@@ -23,6 +23,9 @@ class ChatRequest(BaseModel):
     session_id: str
     lat: float | None = None
     lng: float | None = None
+    # Ảnh khách gửi lên để AI dựng mẫu 3D (nhánh CUSTOM 3D trong chat.py).
+    # Optional vì phần lớn request là chat text thuần, không kèm ảnh.
+    image_url: str | None = None
 
     @field_validator("query")
     @classmethod
@@ -50,6 +53,23 @@ class ChatRequest(BaseModel):
     def validate_lng(cls, v: float | None) -> float | None:
         if v is not None and not (-180.0 <= v <= 180.0):
             raise ValueError("Longitude không hợp lệ (phải trong khoảng -180 đến 180).")
+        return v
+
+    @field_validator("image_url")
+    @classmethod
+    def validate_image_url(cls, v: str | None) -> str | None:
+        # Chỉ validate sơ bộ (không rỗng, có scheme http/https).
+        # KHÔNG kiểm tra ảnh có tồn tại/tải được hay không ở tầng schema —
+        # đó là trách nhiệm của MeshyService khi thực sự gọi API, tách
+        # đúng ranh giới: schema chỉ đảm bảo "đúng hình dạng", không đảm
+        # bảo "đúng ngữ nghĩa/khả dụng".
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            return None
+        if not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("image_url không hợp lệ, phải là đường dẫn http/https.")
         return v
 
 

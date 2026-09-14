@@ -1,8 +1,0 @@
-Root Endpoint: 200 {"message":"WoodHub AI Server đang chạy ổn định theo kiến trúc chuẩn Modular!"}
-Chat Endpoint: 200
-{
-  "intent": "SEARCH_PRODUCT",
-  "answer": "Da xay ra loi khi ket noi toi AI: [Errno 11001] getaddrinfo failed",
-  "entities": {},
-  "status": null
-}

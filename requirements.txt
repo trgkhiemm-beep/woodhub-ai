@@ -4,3 +4,4 @@ groq
 supabase
 python-dotenv
 httpx
+boto3
