@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 
 from app.schemas.chat import ChatRequest
 from app.services.business_engine import business_engine
-from app.services.groq_service import GroqService
+from app.services.bedrock_service import BedrockService
 from app.services.meshy_service import MeshyService
 
 GREETING_LIST = ["chào shop", "shop ơi", "xin chào", "hello", "chào bạn", "hi", "alo", "có ai không", "chào"]
@@ -17,7 +17,7 @@ GREETING_RESPONSE = "chào bạn tôi là trợ lý của woodhub, bạn có nhu
 logger = logging.getLogger("woodhub.chat")
 router = APIRouter()
 
-ai_service = GroqService()
+ai_service = BedrockService()
 meshy_service = MeshyService()
 
 OUT_OF_SCOPE_KEYWORDS = ["chính trị", "tổng thống", "bầu cử", "thời tiết", "dự báo", "bóng đá", "world cup", "thể thao", "lập trình", "code", "python", "javascript"]

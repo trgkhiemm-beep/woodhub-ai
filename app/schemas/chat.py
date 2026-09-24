@@ -58,18 +58,13 @@ class ChatRequest(BaseModel):
     @field_validator("image_url")
     @classmethod
     def validate_image_url(cls, v: str | None) -> str | None:
-        # Chỉ validate sơ bộ (không rỗng, có scheme http/https).
-        # KHÔNG kiểm tra ảnh có tồn tại/tải được hay không ở tầng schema —
-        # đó là trách nhiệm của MeshyService khi thực sự gọi API, tách
-        # đúng ranh giới: schema chỉ đảm bảo "đúng hình dạng", không đảm
-        # bảo "đúng ngữ nghĩa/khả dụng".
         if v is None:
             return v
         v = v.strip()
         if not v:
             return None
         if not (v.startswith("http://") or v.startswith("https://")):
-            raise ValueError("image_url không hợp lệ, phải là đường dẫn http/https.")
+            return None
         return v
 
 

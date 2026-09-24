@@ -93,11 +93,13 @@ class BusinessEngine:
             return {"is_fallback": False, "data": []}
 
         except Exception as e:
-            logger.error(f"Lỗi khi tìm sản phẩm & lọc giá: {str(e)}")
+            if "getaddrinfo failed" in str(e) or "ConnectError" in type(e).__name__:
+                logger.error(f"Lỗi kết nối Supabase (DNS/Network): [Errno 11001] getaddrinfo failed. Vui lòng kiểm tra lại URL Supabase ({self.supabase.supabase_url if hasattr(self.supabase, 'supabase_url') else 'SUPABASE_URL'}) trong file .env")
+            else:
+                logger.error(f"Lỗi khi tìm sản phẩm & lọc giá: {str(e)}")
             return {"is_fallback": False, "data": []}
 
     def add_to_cart(self, session_id: str, sku: str, quantity: int = 1) -> dict:
-        # [GIỮ NGUYÊN CODE CỦA BẠN]
         if quantity <= 0: return {"status": "error", "message": "Số lượng phải lớn hơn 0."}
         if not self.supabase: return {"status": "error", "message": "Hệ thống mất kết nối cơ sở dữ liệu."}
         try:
@@ -117,7 +119,6 @@ class BusinessEngine:
             return {"status": "error", "message": "Không thể thêm vào giỏ hàng lúc này, vui lòng thử lại."}
 
     def view_cart(self, session_id: str) -> dict:
-        # [GIỮ NGUYÊN CODE CỦA BẠN]
         if not self.supabase: return {"status": "error", "message": "Hệ thống mất kết nối cơ sở dữ liệu."}
         try:
             res = self.supabase.table("cart_items").select("product_name, product_variant_sku, quantity, price_at_addition").eq("session_id", session_id).execute()
@@ -128,7 +129,6 @@ class BusinessEngine:
             return {"status": "error", "message": "Không thể tải dữ liệu giỏ hàng lúc này."}
 
     def find_stores(self, keyword: str = None, lat: float = None, lng: float = None, limit: int = 5) -> list:
-        # [GIỮ NGUYÊN CODE CỦA BẠN ĐÃ TỐI ƯU Ở PHẦN TRƯỚC]
         if not self.supabase: return []
         try:
             query = self.supabase.table("stores").select("id, address, ward, district, city, latitude, longitude, phone, supplier_id, suppliers(business_name)")
@@ -154,7 +154,6 @@ class BusinessEngine:
             return []
 
     def estimate_custom_3d(self, wood_type: str, w: float, h: float, d: float) -> dict:
-        # [GIỮ NGUYÊN CODE CỦA BẠN]
         if w <= 0 or h <= 0 or d <= 0: return {"status": "error", "message": "Kích thước (dài, rộng, cao) phải lớn hơn 0."}
         base_price_per_m3 = 10_000_000
         volume_m3 = (w * h * d) / 1_000_000

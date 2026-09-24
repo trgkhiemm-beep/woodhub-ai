@@ -1,6 +1,5 @@
 fastapi
 uvicorn
-groq
 supabase
 python-dotenv
 httpx
