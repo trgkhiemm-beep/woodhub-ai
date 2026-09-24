@@ -1,18 +1,19 @@
 import re
 import json
 import logging
+from typing import Dict, Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 
+from app.core.config import settings
 from app.schemas.chat import ChatRequest
+from app.services.input_normalizer import normalize_input
+from app.services.classifier import classifier
 from app.services.business_engine import business_engine
 from app.services.bedrock_service import BedrockService
 from app.services.meshy_service import MeshyService
-
-GREETING_LIST = ["chào shop", "shop ơi", "xin chào", "hello", "chào bạn", "hi", "alo", "có ai không", "chào"]
-GREETING_RESPONSE = "chào bạn tôi là trợ lý của woodhub, bạn có nhu cầu tìm kiếm hoặc tham khảo sản phẩm nội thất nào cứ việc nhắn tin cho tôi biết nhé"
 
 logger = logging.getLogger("woodhub.chat")
 router = APIRouter()
@@ -20,20 +21,15 @@ router = APIRouter()
 ai_service = BedrockService()
 meshy_service = MeshyService()
 
-OUT_OF_SCOPE_KEYWORDS = ["chính trị", "tổng thống", "bầu cử", "thời tiết", "dự báo", "bóng đá", "world cup", "thể thao", "lập trình", "code", "python", "javascript"]
-OUT_OF_SCOPE_MESSAGE = "Xin lỗi bạn, mình là trợ lý bán hàng của WoodHub, mình chỉ hỗ trợ các thông tin liên quan đến sản phẩm nội thất, tìm kiếm sản phẩm, giỏ hàng và đơn hàng của WoodHub."
-NO_COMPARISON_PRODUCTS_MESSAGE = "Hiện tại WoodHub chưa có sản phẩm của bạn trong kho, bạn có muốn tham khảo hoặc so sánh sản phẩm khác không?"
-NO_LOCATION_MESSAGE = "WoodHub chưa nhận được định vị của bạn. Bạn vui lòng bật định vị trên thiết bị hoặc chia sẻ vị trí để mình tìm showroom/xưởng gần bạn nhất nhé!"
-IMAGE_3D_ACK_MESSAGE = "WoodHub đã nhận ảnh! AI đang nặn mẫu 3D, bạn cho mình xin kích thước (Dài x Rộng x Cao) và loại gỗ để mình tính giá luôn nhé."
-IMAGE_3D_ERROR_MESSAGE = "Xin lỗi bạn, hiện mình chưa thể khởi tạo mô hình 3D từ ảnh này. Bạn thử gửi lại giúp mình nhé."
-CUSTOM_3D_MISSING_SIZE_MESSAGE = "Vui lòng cung cấp đủ 3 kích thước (dài x rộng x cao), ví dụ: 100x50x30cm để mình tính giá gia công."
+# In-memory session context memory for product reference resolution
+# Session memory maps session_id -> { "last_product": dict, "last_query": str }
+session_memory: Dict[str, Dict[str, Any]] = {}
+
+GREETING_LIST = ["chào shop", "shop ơi", "xin chào", "hello", "chào bạn", "hi", "alo", "có ai không", "chào"]
+GREETING_RESPONSE = "Chào bạn! Tôi là trợ lý AI chính thức của WoodHub. Tôi có thể hỗ trợ bạn tìm kiếm và tư vấn thông tin về các sản phẩm nội thất gỗ hiện có trong hệ thống."
+
 CUSTOM_3D_KEYWORDS = ["cm", "kích thước", "tính", "đặt làm", "đóng theo yêu cầu", "custom"]
-WOOD_TYPES = ["óc chó", "tần bì", "thông", "sồi"]
-
-
-def is_out_of_scope(query: str) -> bool:
-    q = query.lower()
-    return any(keyword in q for keyword in OUT_OF_SCOPE_KEYWORDS)
+WOOD_TYPES = ["óc chó", "tần bì", "thông", "sồi", "cao su"]
 
 
 def sse_event(event_type: str, **payload) -> str:
@@ -41,165 +37,189 @@ def sse_event(event_type: str, **payload) -> str:
     return f"data: {data}\n\n"
 
 
-def get_intent_and_data(req: ChatRequest, intent_data: dict) -> dict:
-    q = req.query.lower()
-    result = {
-        "data": None,
-        "suppliers": None,
-        "is_comparison_intent": False,
-        "is_location_intent": False,
-        "is_auto_suggest_location": False,
-        "is_fallback": False
-    }
+def stream_static_message(message: str, data_payload: dict = None):
+    """
+    Helper trả về StreamingResponse chứa 1 thông điệp cố định và đóng kết nối SSE.
+    """
+    async def _generator():
+        yield sse_event("chunk", content=message)
+        if data_payload:
+            yield f"data: {json.dumps(data_payload, ensure_ascii=False)}\n\n"
+        yield sse_event("done")
 
-    if any(k in q for k in ["so sánh", "khác gì", "đối chiếu", "như thế nào với"]): result["is_comparison_intent"] = True
-    if any(k in q for k in ["ở đâu", "cửa hàng", "địa chỉ", "chi nhánh", "showroom", "gần đây", "tìm xưởng"]): result["is_location_intent"] = True
+    return StreamingResponse(
+        _generator(),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"}
+    )
 
-    # 1. GIỎ HÀNG
-    if any(k in q for k in ["giỏ hàng", "xem giỏ", "thêm vào", "xóa khỏi"]):
-        result["data"] = business_engine.view_cart(req.session_id)
 
-    # 2. CUSTOM 3D 
-    elif (any(k in q for k in CUSTOM_3D_KEYWORDS) and re.findall(r"\d+", q)):
-        numbers = re.findall(r"\d+", q)
-        if len(numbers) < 3:
-            result["data"] = {"status": "error", "message": CUSTOM_3D_MISSING_SIZE_MESSAGE}
-        else:
-            wood = next((w for w in WOOD_TYPES if w in q), "sồi")
-            result["data"] = business_engine.estimate_custom_3d(wood, float(numbers[0]), float(numbers[1]), float(numbers[2]))
-            if req.lat is not None and req.lng is not None:
-                result["suppliers"] = business_engine.find_stores(keyword=req.query, lat=req.lat, lng=req.lng)
-                result["is_auto_suggest_location"] = True
-
-    # 3. CHỈ TÌM CỬA HÀNG/XƯỞNG
-    elif result["is_location_intent"] and not intent_data.get("keyword"):
-        if req.lat is not None and req.lng is not None:
-            result["suppliers"] = business_engine.find_stores(keyword=req.query, lat=req.lat, lng=req.lng)
-
-    # 4. TÌM KIẾM SẢN PHẨM & KẾT HỢP XƯỞNG
-    else:
-        # Sử dụng dữ liệu đã bóc tách từ LLM để truy vấn
-        kw = intent_data.get("keyword") or req.query
-        p_res = business_engine.search_product(kw, intent_data.get("price_min"), intent_data.get("price_max"))
-
-        result["data"] = p_res.get("data", [])
-        result["is_fallback"] = p_res.get("is_fallback", False)
-
-        # Nếu khách cũng có ý định tìm xưởng (vd: "tìm xưởng có bán bàn dưới 5tr")
-        if result["is_location_intent"] and req.lat is not None and req.lng is not None:
-            result["suppliers"] = business_engine.find_stores(keyword=kw, lat=req.lat, lng=req.lng)
-
-    return result
-
-async def sse_stream(query: str, context: dict):
-    # Lớp 1: Đánh chặn câu chào rác
-    clean_query = re.sub(r'[.,!?]+$', '', query.lower().strip())
-    if clean_query in GREETING_LIST:
-        yield f"data: {{\"type\": \"chunk\", \"content\": \"{GREETING_RESPONSE}\"}}\n\n"
-        yield "data: {\"type\": \"done\"}\n\n"
-        return
-
-    # Khởi tạo data payload từ context đã được chuẩn bị sẵn, KHÔNG GỌI LẠI DB NỮA
-    data_type = "debug_data"
-    payload = context.get("data", [])
-
+async def generate_chat_stream(query: str, context: dict, session_id: str):
+    """
+    Hàm sinh stream phản hồi chính từ LLM dựa hoàn toàn trên thông tin trong Database context.
+    """
+    products = context.get("data", [])
+    
+    # Bắn gói dữ liệu sản phẩm trước hoặc trong quá trình stream để frontend render UI card
+    result_data = {"type": "debug_data", "payload": products}
     if context.get("suppliers"):
-        if isinstance(payload, list) and payload:
-             data_type = "mixed_data"
-             result_data = {"type": data_type, "products": payload, "stores": context["suppliers"]}
-        elif isinstance(payload, dict) and "estimated_price" in payload:
-             data_type = "mixed_data"
-             result_data = {"type": data_type, "custom_3d": payload, "stores": context["suppliers"]}
-        else:
-             data_type = "store_data"
-             result_data = {"type": data_type, "payload": context["suppliers"]}
-    else:
-        result_data = {"type": data_type, "payload": payload}
+        result_data = {"type": "mixed_data", "products": products, "stores": context["suppliers"]}
 
-    # Phản hồi stream text từ AI
     try:
-        async for chunk in ai_service.generate_response_stream(query, context):
-            yield f"data: {{\"type\": \"chunk\", \"content\": \"{chunk}\"}}\n\n"
+        async for chunk in ai_service.generate_grounded_response_stream(query, context):
+            yield sse_event("chunk", content=chunk)
     except Exception as e:
-        yield f"data: {{\"type\": \"error\", \"message\": \"{str(e)}\"}}\n\n"
-        yield "data: {\"type\": \"done\"}\n\n"
+        logger.error(f"Lỗi khi sinh response stream: {e}")
+        yield sse_event("chunk", content=settings.DATABASE_ERROR_MESSAGE)
+        yield sse_event("done")
         return
 
-    # Bắn gói dữ liệu sản phẩm xuống frontend
+    # Bắn dữ liệu payload để UI hiển thị sản phẩm
     json_payload = json.dumps(result_data, ensure_ascii=False)
     yield f"data: {json_payload}\n\n"
-    yield "data: {\"type\": \"done\"}\n\n"
-
-
-async def image_3d_stream(task_id: str):
-    yield sse_event("chunk", content=IMAGE_3D_ACK_MESSAGE)
-    yield sse_event("data", type="3d_generating", task_id=task_id, progress=0)
     yield sse_event("done")
+
 
 @router.post("/chat")
 async def chat_endpoint(request: ChatRequest):
+    session_id = request.session_id
+    query_text = request.query
+
+    # 0. Xử lý yêu cầu dựng ảnh 3D qua Meshy (Nếu request gửi kèm image_url)
     if request.image_url:
         try:
             task_id = await meshy_service.create_image_to_3d_task(request.image_url)
+            async def image_3d_stream():
+                yield sse_event("chunk", content="WoodHub đã nhận ảnh! AI đang nặn mẫu 3D, bạn vui lòng đợi trong giây lát...")
+                yield sse_event("data", type="3d_generating", task_id=task_id, progress=0)
+                yield sse_event("done")
+            return StreamingResponse(image_3d_stream(), media_type="text/event-stream")
         except Exception:
             logger.exception("Lỗi khi khởi tạo tác vụ Meshy 3D từ ảnh")
+            return stream_static_message("Xin lỗi bạn, hiện mình chưa thể khởi tạo mô hình 3D từ ảnh này. Bạn thử gửi lại giúp mình nhé.")
 
-            async def image_3d_error_stream():
-                yield sse_event("chunk", content=IMAGE_3D_ERROR_MESSAGE)
-                yield sse_event("done")
+    # 1. INPUT NORMALIZATION
+    norm = normalize_input(query_text)
+    cleaned_query = norm["cleaned"]
 
-            return StreamingResponse(image_3d_error_stream(), media_type="text/event-stream")
+    # Đánh chặn câu chào rác
+    if cleaned_query in GREETING_LIST:
+        return stream_static_message(GREETING_RESPONSE)
 
-        return StreamingResponse(image_3d_stream(task_id), media_type="text/event-stream")
+    # 2. SCOPE / INTENT CLASSIFICATION
+    # Kiểm tra xem session trước đó có sản phẩm đang thảo luận hay không
+    has_session_product = session_id in session_memory and bool(session_memory[session_id].get("last_product"))
+    
+    classification = await classifier.classify(query_text, context_has_product=has_session_product)
+    scope = classification.get("scope")
 
-    if is_out_of_scope(request.query):
-        async def scope_stream():
-            yield sse_event("chunk", content=OUT_OF_SCOPE_MESSAGE)
-            yield sse_event("done")
-        return StreamingResponse(scope_stream(), media_type="text/event-stream")
+    # Xử lý các trạng thái phân loại theo đúng Decision Tree (Phần 25):
+    
+    # (A) OUT_OF_SCOPE
+    if scope == "OUT_OF_SCOPE":
+        return stream_static_message(settings.OUT_OF_SCOPE_MESSAGE)
 
-    try:
-        # Bóc tách ý định bằng AI (Async) trước tiên
-        intent_data = await ai_service.extract_search_intent(request.query)
-        # Ném vào Threadpool để gọi DB (Sync)
-        full_result = await run_in_threadpool(get_intent_and_data, request, intent_data)
-    except Exception:
-        logger.exception("Lỗi khi truy vấn dữ liệu")
-        raise HTTPException(status_code=503, detail="Hệ thống dữ liệu tạm thời không khả dụng.")
+    # (B) UNKNOWN
+    if scope == "UNKNOWN":
+        return stream_static_message(settings.UNKNOWN_MESSAGE)
 
-    if full_result.get("is_location_intent") and (request.lat is None or request.lng is None):
-        async def no_location_stream():
-            yield sse_event("chunk", content=NO_LOCATION_MESSAGE)
-            yield sse_event("done")
-        return StreamingResponse(no_location_stream(), media_type="text/event-stream")
+    # (C) AMBIGUOUS
+    if scope == "AMBIGUOUS":
+        # Nếu có sản phẩm trong session_memory, gắn sản phẩm đó vào context
+        if has_session_product:
+            referenced_product = session_memory[session_id]["last_product"]
+            search_res = {"status": "success", "data": [referenced_product]}
+        else:
+            return stream_static_message(settings.AMBIGUOUS_CLARIFICATION_MESSAGE)
 
-    data = full_result["data"]
-    if full_result.get("is_comparison_intent") and (not data or data == [] or data == {}):
-        async def no_product_stream():
-            yield sse_event("chunk", content=NO_COMPARISON_PRODUCTS_MESSAGE)
-            yield sse_event("done")
-        return StreamingResponse(no_product_stream(), media_type="text/event-stream")
+    # (D) IN_SCOPE
+    if scope == "IN_SCOPE" or has_session_product:
+        # Xử lý nhánh tính giá Custom 3D
+        if any(k in cleaned_query for k in CUSTOM_3D_KEYWORDS) and re.findall(r"\d+", cleaned_query):
+            numbers = re.findall(r"\d+", cleaned_query)
+            if len(numbers) < 3:
+                return stream_static_message("Vui lòng cung cấp đủ 3 kích thước (dài x rộng x cao), ví dụ: 100x50x30cm để mình tính giá gia công.")
+            wood = next((w for w in WOOD_TYPES if w in cleaned_query), "sồi")
+            custom_data = business_engine.estimate_custom_3d(wood, float(numbers[0]), float(numbers[1]), float(numbers[2]))
+            return stream_static_message(custom_data.get("message", "Đã tính toán giá custom 3D."))
 
-    # Xây dựng context tổng thể để AI và Frontend sử dụng
-    context = {
-        "data": data,
-        "suppliers": full_result.get("suppliers"),
-        "is_comparison": full_result.get("is_comparison_intent"),
-        "is_auto_suggest_location": full_result.get("is_auto_suggest_location"),
-        "is_fallback": full_result.get("is_fallback")
-    }
+        # Xử lý nhánh thao tác Giỏ hàng
+        if any(k in cleaned_query for k in ["giỏ hàng", "gio hang", "xem giỏ", "thêm vào giỏ"]):
+            cart_data = business_engine.view_cart(session_id)
+            if cart_data.get("status") == "empty":
+                return stream_static_message("Giỏ hàng của bạn hiện tại đang trống.")
+            elif cart_data.get("status") == "success":
+                msg = f"Giỏ hàng của bạn gồm {len(cart_data['items'])} sản phẩm, tổng giá trị là {int(cart_data['total']):,.0f} VNĐ.".replace(",", ".")
+                return stream_static_message(msg, data_payload={"type": "cart_data", "payload": cart_data})
 
-    return StreamingResponse(
-        sse_stream(request.query, context),
-        media_type="text/event-stream",
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
-    )
+        # 3. DATABASE SEARCH (Thực thi truy vấn cơ sở dữ liệu)
+        search_query_info = classification.get("search_query") or {}
+        kw = search_query_info.get("keyword") or query_text
+        min_p = search_query_info.get("min_price")
+        max_p = search_query_info.get("max_price")
+        cat = search_query_info.get("category")
+        mat = search_query_info.get("material") or search_query_info.get("wood_type")
+        color_param = search_query_info.get("color")
+
+        # Gọi Database (Ném vào threadpool)
+        search_res = await run_in_threadpool(
+            business_engine.search_product,
+            keyword=kw,
+            min_price=min_p,
+            max_price=max_p,
+            category=cat,
+            material=mat,
+            color=color_param
+        )
+
+        # 4. CHECK DATABASE RESULT (Phần 11 & 25)
+
+        # (Case B) DATABASE SEARCH FAILURE (Lỗi truy vấn kết nối DB)
+        if search_res.get("status") == "error":
+            return stream_static_message(settings.DATABASE_ERROR_MESSAGE)
+
+        # (Case A) PRODUCT NOT FOUND (Không tìm thấy sản phẩm trong DB)
+        products = search_res.get("data", [])
+        if search_res.get("status") == "empty" or not products:
+            return stream_static_message(settings.MISSING_PRODUCT_MESSAGE)
+
+        # 5. CHECK REQUESTED ATTRIBUTES (Phần 12)
+        # Nếu người dùng hỏi thuộc tính cụ thể (ví dụ: màu sắc, kích thước) nhưng DB không có thông tin
+        requested_attr = search_query_info.get("requested_attribute")
+        if requested_attr:
+            first_product = products[0]
+            if not business_engine.check_attribute_availability(first_product, requested_attr):
+                return stream_static_message(settings.ATTRIBUTE_NOT_FOUND_MESSAGE)
+
+        # Lưu sản phẩm vào memory của session để hỗ trợ các câu hỏi tham chiếu tiếp theo (Phần 19)
+        session_memory[session_id] = {
+            "last_product": products[0],
+            "last_query": query_text
+        }
+
+        # 6. GENERATE ANSWER ONLY FROM DATABASE (Gửi context xuống cho LLM stream)
+        context = {
+            "data": products,
+            "query": query_text
+        }
+
+        # Lấy thêm thông tin cửa hàng nếu người dùng hỏi vị trí
+        if any(k in cleaned_query for k in ["ở đâu", "cửa hàng", "địa chỉ", "chi nhánh", "showroom", "gần đây"]) and request.lat and request.lng:
+            stores = business_engine.find_stores(keyword=kw, lat=request.lat, lng=request.lng)
+            if stores:
+                context["suppliers"] = stores
+
+        return StreamingResponse(
+            generate_chat_stream(query_text, context, session_id),
+            media_type="text/event-stream",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"}
+        )
+
 
 @router.get("/api/3d/status/{task_id}")
 async def get_3d_status(task_id: str):
     status_info = await meshy_service.check_task_status(task_id)
 
-    # Kiểm tra trạng thái và trả về cấu trúc Frontend mong muốn
     if status_info.get("status") == "SUCCEEDED":
         return {
             "type": "3d_ready",

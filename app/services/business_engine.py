@@ -2,6 +2,7 @@ import math
 import logging
 import re
 from app.core.database import supabase
+from app.services.input_normalizer import remove_vietnamese_diacritics, normalize_input
 
 logger = logging.getLogger("woodhub.business_engine")
 
@@ -27,77 +28,143 @@ class BusinessEngine:
         c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
         return round(R * c, 2)
 
-    def search_product(self, keyword: str, price_min: float = None, price_max: float = None) -> dict:
+    def search_product(self, keyword: str = None, min_price: float = None, max_price: float = None, category: str = None, material: str = None, color: str = None) -> dict:
         """
-        Tìm kiếm lai: Kết hợp NLP Stop-words thủ công + Inner Join lọc giá.
-        Trả về dict: {"is_fallback": bool, "data": list}
+        DATABASE-FIRST SEARCH SYSTEM.
+        Truy vấn toàn bộ hoặc lọc sản phẩm từ Supabase với hỗ trợ Tiếng Việt không dấu & lọc chuẩn.
+        
+        Trả về dict:
+        - status: "success" | "empty" | "error"
+        - data: list sản phẩm
+        - error: chi tiết lỗi kỹ thuật nếu có
         """
-        if not self.supabase or not keyword:
-            return {"is_fallback": False, "data": []}
+        if not self.supabase:
+            return {"status": "error", "data": [], "error": "Mất kết nối cơ sở dữ liệu."}
 
-        # 1. TIỀN XỬ LÝ TỪ KHÓA (Lọc từ rác nếu AI trả về chuỗi còn nhiễu)
-        clean_text = re.sub(r'[.,!?]', ' ', keyword.lower())
-        stop_phrases = ["tôi muốn mua", "mình muốn mua", "cho mình xem", "cho xem", "có bán", "mình cần tìm", "tôi cần tìm", "tôi tìm", "tôi cần", "chào shop", "shop ơi", "xin chào", "cửa hàng", "cái", "chiếc", "bộ", "ạ", "nhỉ", "không", "nhé", "có"]
-        padded_text = f" {clean_text} "
-        for phrase in stop_phrases:
-            padded_text = padded_text.replace(f" {phrase} ", " ")
-        final_keyword = re.sub(r'\s+', ' ', padded_text).strip()
-
-        if len(final_keyword) < 2:
-            return {"is_fallback": False, "data": []}
-
-        # 2. TRUY VẤN LỌC GIÁ TIÊU CHUẨN
         try:
-            # Lấy data và map variants lên cấp 1 để logic client không đổi
-            query = self.supabase.table("products").select("id, name, description, status, product_variants!inner(price)")
-            query = query.ilike("name", f"%{final_keyword}%")
+            query = self.supabase.table("products").select(
+                "id, name, description, status, categories(name), materials(name), product_variants(id, sku, color, price, dimensions)"
+            ).eq("status", "active")
+
+            response = query.execute()
+            raw_products = response.data if response.data else []
+
+            if not raw_products:
+                return {"status": "empty", "data": []}
+
+            filtered = []
             
-            if price_min is not None:
-                query = query.gte("product_variants.price", price_min)
-            if price_max is not None:
-                query = query.lte("product_variants.price", price_max)
+            kw_unaccented = remove_vietnamese_diacritics(keyword).lower() if keyword else ""
+            cat_unaccented = remove_vietnamese_diacritics(category).lower() if category else ""
+            mat_unaccented = remove_vietnamese_diacritics(material).lower() if material else ""
+            color_unaccented = remove_vietnamese_diacritics(color).lower() if color else ""
+
+            # Stop phrases filtering
+            stop_phrases = ["toi muon mua", "minh muon mua", "cho minh xem", "cho xem", "co ban", "minh can tim", "toi can tim", "toi tim", "toi can", "chao shop", "shop oi", "xin chao", "cua hang", "cai", "chiec", "bo", "a", "nhi", "khong", "nhe", "co", "tim", "cho"]
+            for phrase in stop_phrases:
+                kw_unaccented = re.sub(rf'\b{phrase}\b', '', kw_unaccented)
+            kw_unaccented = re.sub(r'\s+', ' ', kw_unaccented).strip()
+
+            # Trích xuất các từ quan trọng (bỏ qua từ quá ngắn ngoại trừ các số)
+            kw_words = [w for w in kw_unaccented.split() if len(w) > 1 or w.isdigit()]
+
+            for p in raw_products:
+                p_name = p.get("name") or ""
+                p_name_unaccented = remove_vietnamese_diacritics(p_name).lower()
                 
-            response = query.limit(5).execute()
-            raw_data = response.data if response.data else []
+                cat_obj = p.get("categories") or {}
+                cat_name = cat_obj.get("name") if isinstance(cat_obj, dict) else ""
+                cat_name_unaccented = remove_vietnamese_diacritics(cat_name).lower()
 
-            def format_data(data_list):
-                processed = []
-                for p in data_list:
-                    variants = p.get("product_variants")
-                    p["price"] = variants[0].get("price", 0) if variants and isinstance(variants, list) else 0
-                    if "product_variants" in p:
-                        del p["product_variants"]
-                    processed.append(p)
-                return processed
+                mat_obj = p.get("materials") or {}
+                mat_name = mat_obj.get("name") if isinstance(mat_obj, dict) else ""
+                mat_name_unaccented = remove_vietnamese_diacritics(mat_name).lower()
 
-            if raw_data:
-                return {"is_fallback": False, "data": format_data(raw_data)}
+                variants = p.get("product_variants") or []
+                variant_prices = [v.get("price") for v in variants if isinstance(v, dict) and v.get("price") is not None]
+                variant_colors = [v.get("color") for v in variants if isinstance(v, dict) and v.get("color")]
+                variant_colors_unaccented = [remove_vietnamese_diacritics(c).lower() for c in variant_colors]
 
-            # 3. CƠ CHẾ FALLBACK (Chỉ kích hoạt nếu có điều kiện giá mà tìm không thấy)
-            if price_min is not None or price_max is not None:
-                fb_query = self.supabase.table("products").select("id, name, description, status, product_variants!inner(price)").ilike("name", f"%{final_keyword}%").limit(20).execute()
-                fb_data = fb_query.data if fb_query.data else []
-                
-                if not fb_data:
-                    return {"is_fallback": False, "data": []}
-                
-                target_price = ((price_min + price_max) / 2) if (price_min and price_max) else (price_min or price_max)
-                
-                def price_diff(item):
-                    v = item.get("product_variants", [])
-                    return abs(v[0].get("price", 0) - target_price) if v else float('inf')
+                # 1. Match Keyword (tên sản phẩm, danh mục, chất liệu, hoặc màu)
+                if kw_words:
+                    matched_words = [
+                        w for w in kw_words 
+                        if w in p_name_unaccented 
+                        or w in cat_name_unaccented 
+                        or w in mat_name_unaccented 
+                        or any(w in c for c in variant_colors_unaccented)
+                    ]
+                    
+                    # Nếu người dùng có nhiều từ mô tả cụ thể, tỷ lệ khớp phải cao (ví dụ >= 60%)
+                    match_ratio = len(matched_words) / len(kw_words)
+                    if len(kw_words) == 1 and match_ratio < 1.0:
+                        continue
+                    elif len(kw_words) >= 2 and match_ratio < 0.6:
+                        continue
 
-                fb_data.sort(key=price_diff)
-                return {"is_fallback": True, "data": format_data(fb_data[:3])}
+                # 2. Match Category
+                if cat_unaccented and cat_unaccented not in cat_name_unaccented:
+                    continue
 
-            return {"is_fallback": False, "data": []}
+                # 3. Match Material
+                if mat_unaccented and mat_unaccented not in mat_name_unaccented and mat_unaccented not in p_name_unaccented:
+                    continue
+
+                # 4. Match Color
+                if color_unaccented and not any(color_unaccented in c for c in variant_colors_unaccented):
+                    continue
+
+                # 5. Match Price Filter
+                if variant_prices:
+                    min_v_price = min(variant_prices)
+                    max_v_price = max(variant_prices)
+                    if min_price is not None and max_v_price < min_price:
+                        continue
+                    if max_price is not None and min_v_price > max_price:
+                        continue
+
+                p["category_name"] = cat_name
+                p["material_name"] = mat_name
+                p["price"] = variant_prices[0] if variant_prices else 0
+                p["dimensions"] = variants[0].get("dimensions") if variants else None
+                p["color"] = variant_colors[0] if variant_colors else None
+                p["sku"] = variants[0].get("sku") if variants else None
+
+                filtered.append(p)
+
+            if not filtered:
+                return {"status": "empty", "data": []}
+
+            return {"status": "success", "data": filtered[:5]}
 
         except Exception as e:
-            if "getaddrinfo failed" in str(e) or "ConnectError" in type(e).__name__:
-                logger.error(f"Lỗi kết nối Supabase (DNS/Network): [Errno 11001] getaddrinfo failed. Vui lòng kiểm tra lại URL Supabase ({self.supabase.supabase_url if hasattr(self.supabase, 'supabase_url') else 'SUPABASE_URL'}) trong file .env")
-            else:
-                logger.error(f"Lỗi khi tìm sản phẩm & lọc giá: {str(e)}")
-            return {"is_fallback": False, "data": []}
+            logger.error(f"Lỗi khi truy vấn sản phẩm Supabase: {e}")
+            return {"status": "error", "data": [], "error": str(e)}
+
+    def check_attribute_availability(self, product: dict, requested_attribute: str) -> bool:
+        if not product or not requested_attribute:
+            return True
+
+        req = requested_attribute.lower()
+        if "color" in req or "màu" in req:
+            variants = product.get("product_variants") or []
+            has_color = any(v.get("color") for v in variants if isinstance(v, dict))
+            return has_color or bool(product.get("color"))
+        
+        if "dimension" in req or "kích thước" in req or "size" in req:
+            variants = product.get("product_variants") or []
+            has_dim = any(v.get("dimensions") for v in variants if isinstance(v, dict))
+            return has_dim or bool(product.get("dimensions"))
+
+        if "material" in req or "chất liệu" in req or "loại gỗ" in req:
+            mat = product.get("materials") or product.get("material_name")
+            return bool(mat)
+
+        if "price" in req or "giá" in req:
+            price = product.get("price")
+            return price is not None and price > 0
+
+        return True
 
     def add_to_cart(self, session_id: str, sku: str, quantity: int = 1) -> dict:
         if quantity <= 0: return {"status": "error", "message": "Số lượng phải lớn hơn 0."}
