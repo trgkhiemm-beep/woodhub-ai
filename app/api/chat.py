@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 
 from app.core.config import settings
 from app.schemas.chat import ChatRequest
-from app.services.input_normalizer import normalize_input
+from app.services.input_normalizer import normalize_vietnamese_chat
 from app.services.classifier import classifier
 from app.services.business_engine import business_engine
 from app.services.bedrock_service import BedrockService
@@ -22,10 +22,10 @@ ai_service = BedrockService()
 meshy_service = MeshyService()
 
 # In-memory session context memory for product reference resolution
-# Session memory maps session_id -> { "last_product": dict, "last_query": str }
+# Session memory maps session_id -> { "last_product": dict, "last_query": str, "last_normalized": str }
 session_memory: Dict[str, Dict[str, Any]] = {}
 
-GREETING_LIST = ["chào shop", "shop ơi", "xin chào", "hello", "chào bạn", "hi", "alo", "có ai không", "chào"]
+GREETING_LIST = ["chào shop", "shop ơi", "xin chào", "hello", "chào bạn", "hi", "alo", "có ai không", "chào", "chao shop", "shop oi", "xin chao"]
 GREETING_RESPONSE = "Chào bạn! Tôi là trợ lý AI chính thức của WoodHub. Tôi có thể hỗ trợ bạn tìm kiếm và tư vấn thông tin về các sản phẩm nội thất gỗ hiện có trong hệ thống."
 
 CUSTOM_3D_KEYWORDS = ["cm", "kích thước", "tính", "đặt làm", "đóng theo yêu cầu", "custom"]
@@ -56,11 +56,11 @@ def stream_static_message(message: str, data_payload: dict = None):
 
 async def generate_chat_stream(query: str, context: dict, session_id: str):
     """
-    Hàm sinh stream phản hồi chính từ LLM dựa hoàn toàn trên thông tin trong Database context.
+    Hàm sinh stream phản hồi từ LLM dựa hoàn toàn trên thông tin trong Database context (Mục 26).
     """
     products = context.get("data", [])
     
-    # Bắn gói dữ liệu sản phẩm trước hoặc trong quá trình stream để frontend render UI card
+    # Bắn gói dữ liệu sản phẩm để frontend render UI card
     result_data = {"type": "debug_data", "payload": products}
     if context.get("suppliers"):
         result_data = {"type": "mixed_data", "products": products, "stores": context["suppliers"]}
@@ -98,53 +98,53 @@ async def chat_endpoint(request: ChatRequest):
             logger.exception("Lỗi khi khởi tạo tác vụ Meshy 3D từ ảnh")
             return stream_static_message("Xin lỗi bạn, hiện mình chưa thể khởi tạo mô hình 3D từ ảnh này. Bạn thử gửi lại giúp mình nhé.")
 
-    # 1. INPUT NORMALIZATION
-    norm = normalize_input(query_text)
-    cleaned_query = norm["cleaned"]
+    # 1. INPUT NORMALIZATION PIPELINE (Mục 16)
+    norm = normalize_vietnamese_chat(query_text)
+    cleaned_query = norm["cleaned_input"]
+    normalized_query = norm["normalized_input"]
 
     # Đánh chặn câu chào rác
-    if cleaned_query in GREETING_LIST:
+    if cleaned_query in GREETING_LIST or normalized_query in GREETING_LIST:
         return stream_static_message(GREETING_RESPONSE)
 
-    # 2. SCOPE / INTENT CLASSIFICATION
-    # Kiểm tra xem session trước đó có sản phẩm đang thảo luận hay không
+    # 2. SCOPE & INTENT CLASSIFICATION
+    # Kiểm tra xem session trước đó có sản phẩm đang thảo luận hay không (Mục 19)
     has_session_product = session_id in session_memory and bool(session_memory[session_id].get("last_product"))
     
     classification = await classifier.classify(query_text, context_has_product=has_session_product)
     scope = classification.get("scope")
+    intent = classification.get("intent")
 
-    # Xử lý các trạng thái phân loại theo đúng Decision Tree (Phần 25):
-    
-    # (A) OUT_OF_SCOPE
+    # (A) OUT_OF_SCOPE (Mục 24: DO NOT GUESS / REJECT)
     if scope == "OUT_OF_SCOPE":
         return stream_static_message(settings.OUT_OF_SCOPE_MESSAGE)
 
-    # (B) UNKNOWN
+    # (B) UNKNOWN (Mục 7 & 24: IMPOSSIBLE -> CLARIFY)
     if scope == "UNKNOWN":
         return stream_static_message(settings.UNKNOWN_MESSAGE)
 
-    # (C) AMBIGUOUS
+    # (C) AMBIGUOUS (Mục 7 & 20: UNCERTAIN -> CLARIFY)
     if scope == "AMBIGUOUS":
-        # Nếu có sản phẩm trong session_memory, gắn sản phẩm đó vào context
+        # Nếu có sản phẩm trong session_memory, gắn sản phẩm đó vào context tham chiếu (Mục 19)
         if has_session_product:
             referenced_product = session_memory[session_id]["last_product"]
-            search_res = {"status": "success", "data": [referenced_product]}
+            search_res = {"status": "success", "data": [referenced_product], "match_confidence": "HIGH_CONFIDENCE"}
         else:
             return stream_static_message(settings.AMBIGUOUS_CLARIFICATION_MESSAGE)
 
     # (D) IN_SCOPE
-    if scope == "IN_SCOPE" or has_session_product:
+    if scope == "IN_SCOPE" or (scope == "AMBIGUOUS" and has_session_product):
         # Xử lý nhánh tính giá Custom 3D
-        if any(k in cleaned_query for k in CUSTOM_3D_KEYWORDS) and re.findall(r"\d+", cleaned_query):
-            numbers = re.findall(r"\d+", cleaned_query)
+        if intent == "CUSTOM_3D" or (any(k in normalized_query for k in CUSTOM_3D_KEYWORDS) and re.findall(r"\d+", normalized_query)):
+            numbers = re.findall(r"\d+", normalized_query)
             if len(numbers) < 3:
                 return stream_static_message("Vui lòng cung cấp đủ 3 kích thước (dài x rộng x cao), ví dụ: 100x50x30cm để mình tính giá gia công.")
-            wood = next((w for w in WOOD_TYPES if w in cleaned_query), "sồi")
+            wood = next((w for w in WOOD_TYPES if w in normalized_query), "sồi")
             custom_data = business_engine.estimate_custom_3d(wood, float(numbers[0]), float(numbers[1]), float(numbers[2]))
             return stream_static_message(custom_data.get("message", "Đã tính toán giá custom 3D."))
 
         # Xử lý nhánh thao tác Giỏ hàng
-        if any(k in cleaned_query for k in ["giỏ hàng", "gio hang", "xem giỏ", "thêm vào giỏ"]):
+        if intent == "CART_ACTION" or any(k in normalized_query for k in ["gio hang", "xem gio", "them vao gio", "gio"]):
             cart_data = business_engine.view_cart(session_id)
             if cart_data.get("status") == "empty":
                 return stream_static_message("Giỏ hàng của bạn hiện tại đang trống.")
@@ -152,9 +152,9 @@ async def chat_endpoint(request: ChatRequest):
                 msg = f"Giỏ hàng của bạn gồm {len(cart_data['items'])} sản phẩm, tổng giá trị là {int(cart_data['total']):,.0f} VNĐ.".replace(",", ".")
                 return stream_static_message(msg, data_payload={"type": "cart_data", "payload": cart_data})
 
-        # 3. DATABASE SEARCH (Thực thi truy vấn cơ sở dữ liệu)
-        search_query_info = classification.get("search_query") or {}
-        kw = search_query_info.get("keyword") or query_text
+        # 3. DATABASE SEARCH (Thực thi truy vấn cơ sở dữ liệu dựa trên entity đã trích xuất)
+        search_query_info = classification.get("search_query") or classification.get("entities") or {}
+        kw = search_query_info.get("keyword") or search_query_info.get("product_query") or query_text
         min_p = search_query_info.get("min_price")
         max_p = search_query_info.get("max_price")
         cat = search_query_info.get("category")
@@ -162,49 +162,68 @@ async def chat_endpoint(request: ChatRequest):
         color_param = search_query_info.get("color")
 
         # Gọi Database (Ném vào threadpool)
-        search_res = await run_in_threadpool(
-            business_engine.search_product,
-            keyword=kw,
-            min_price=min_p,
-            max_price=max_p,
-            category=cat,
-            material=mat,
-            color=color_param
-        )
+        if not (scope == "AMBIGUOUS" and has_session_product):
+            search_res = await run_in_threadpool(
+                business_engine.search_product,
+                keyword=kw,
+                min_price=min_p,
+                max_price=max_p,
+                category=cat,
+                material=mat,
+                color=color_param
+            )
 
-        # 4. CHECK DATABASE RESULT (Phần 11 & 25)
+        # 4. CHECK DATABASE RESULT (Mục 17, 18, 27)
 
-        # (Case B) DATABASE SEARCH FAILURE (Lỗi truy vấn kết nối DB)
+        # (Case B) DATABASE SEARCH FAILURE
         if search_res.get("status") == "error":
             return stream_static_message(settings.DATABASE_ERROR_MESSAGE)
 
-        # (Case A) PRODUCT NOT FOUND (Không tìm thấy sản phẩm trong DB)
+        # (Case A) PRODUCT NOT FOUND / WEAK MATCH REJECTED (Mục 17, 18)
         products = search_res.get("data", [])
-        if search_res.get("status") == "empty" or not products:
+        if search_res.get("status") == "empty" or not products or search_res.get("match_confidence") == "NO_MATCH":
             return stream_static_message(settings.MISSING_PRODUCT_MESSAGE)
 
-        # 5. CHECK REQUESTED ATTRIBUTES (Phần 12)
-        # Nếu người dùng hỏi thuộc tính cụ thể (ví dụ: màu sắc, kích thước) nhưng DB không có thông tin
+        # 5. CHECK REQUESTED ATTRIBUTES
         requested_attr = search_query_info.get("requested_attribute")
         if requested_attr:
             first_product = products[0]
             if not business_engine.check_attribute_availability(first_product, requested_attr):
                 return stream_static_message(settings.ATTRIBUTE_NOT_FOUND_MESSAGE)
 
-        # Lưu sản phẩm vào memory của session để hỗ trợ các câu hỏi tham chiếu tiếp theo (Phần 19)
+        # Lưu sản phẩm vào memory của session để hỗ trợ các câu hỏi tham chiếu tiếp theo (Mục 19)
         session_memory[session_id] = {
             "last_product": products[0],
-            "last_query": query_text
+            "last_query": query_text,
+            "last_normalized": normalized_query
         }
 
-        # 6. GENERATE ANSWER ONLY FROM DATABASE (Gửi context xuống cho LLM stream)
+        # 6. DETERMINISTIC RESPONSE FAST PATH (Mục 21, 27)
+        # Các câu hỏi đơn giản (Hỏi sự tồn tại, hỏi giá trực tiếp) -> trả lời ngay không cần qua LLM
+        first_product = products[0]
+        prod_name = first_product.get("name", "Sản phẩm")
+        prod_price = first_product.get("price", 0)
+        price_str = f"{int(prod_price):,.0f} VNĐ".replace(",", ".") if prod_price and prod_price > 0 else "đang cập nhật giá"
+
+        if intent == "PRODUCT_EXISTENCE":
+            fast_resp = f"Có. Hệ thống hiện có {prod_name}."
+            return stream_static_message(fast_resp, data_payload={"type": "debug_data", "payload": products})
+
+        if intent == "PRODUCT_PRICE":
+            fast_resp = f"Sản phẩm {prod_name} hiện có giá là {price_str}."
+            return stream_static_message(fast_resp, data_payload={"type": "debug_data", "payload": products})
+
+        # 7. GENERATE GROUNDED ANSWER FROM DATABASE CONTEXT (LLM Stream for advisory/comparisons)
         context = {
             "data": products,
-            "query": query_text
+            "query": query_text,
+            "normalized_query": normalized_query,
+            "intent": intent,
+            "entities": search_query_info
         }
 
         # Lấy thêm thông tin cửa hàng nếu người dùng hỏi vị trí
-        if any(k in cleaned_query for k in ["ở đâu", "cửa hàng", "địa chỉ", "chi nhánh", "showroom", "gần đây"]) and request.lat and request.lng:
+        if intent == "STORE_LOCATION" or (any(k in normalized_query for k in ["o dau", "cua hang", "dia chi", "chi nhanh", "showroom", "gan day"]) and request.lat and request.lng):
             stores = business_engine.find_stores(keyword=kw, lat=request.lat, lng=request.lng)
             if stores:
                 context["suppliers"] = stores

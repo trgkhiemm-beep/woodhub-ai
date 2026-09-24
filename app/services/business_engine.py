@@ -1,8 +1,9 @@
 import math
 import logging
 import re
+from typing import Dict, Any, List, Optional
 from app.core.database import supabase
-from app.services.input_normalizer import remove_vietnamese_diacritics, normalize_input
+from app.services.input_normalizer import remove_vietnamese_diacritics, normalize_vietnamese_chat
 
 logger = logging.getLogger("woodhub.business_engine")
 
@@ -12,6 +13,7 @@ class BusinessEngine:
         "óc chó": 2.5,   
         "tần bì": 1.1,   
         "thông": 0.7,    
+        "cao su": 0.8
     }
 
     def __init__(self):
@@ -28,18 +30,28 @@ class BusinessEngine:
         c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
         return round(R * c, 2)
 
-    def search_product(self, keyword: str = None, min_price: float = None, max_price: float = None, category: str = None, material: str = None, color: str = None) -> dict:
+    def search_product(
+        self,
+        keyword: str = None,
+        min_price: float = None,
+        max_price: float = None,
+        category: str = None,
+        material: str = None,
+        color: str = None
+    ) -> dict:
         """
-        DATABASE-FIRST SEARCH SYSTEM.
-        Truy vấn toàn bộ hoặc lọc sản phẩm từ Supabase với hỗ trợ Tiếng Việt không dấu & lọc chuẩn.
+        DATABASE-FIRST SEARCH SYSTEM WITH CONFIDENCE RANKING (Mục 17, 18).
+        Truy vấn toàn bộ hoặc lọc sản phẩm từ Supabase với hỗ trợ Tiếng Việt không dấu,
+        loại bỏ nhiễu và phân loại độ chắc chắn: HIGH_CONFIDENCE, POSSIBLE, WEAK, NO_MATCH.
         
         Trả về dict:
         - status: "success" | "empty" | "error"
         - data: list sản phẩm
+        - match_confidence: "HIGH_CONFIDENCE" | "POSSIBLE" | "WEAK" | "NO_MATCH"
         - error: chi tiết lỗi kỹ thuật nếu có
         """
         if not self.supabase:
-            return {"status": "error", "data": [], "error": "Mất kết nối cơ sở dữ liệu."}
+            return {"status": "error", "data": [], "match_confidence": "NO_MATCH", "error": "Mất kết nối cơ sở dữ liệu."}
 
         try:
             query = self.supabase.table("products").select(
@@ -50,23 +62,30 @@ class BusinessEngine:
             raw_products = response.data if response.data else []
 
             if not raw_products:
-                return {"status": "empty", "data": []}
+                return {"status": "empty", "data": [], "match_confidence": "NO_MATCH"}
 
-            filtered = []
-            
-            kw_unaccented = remove_vietnamese_diacritics(keyword).lower() if keyword else ""
+            # Chuẩn hóa từ khóa tìm kiếm
+            norm_info = normalize_vietnamese_chat(keyword or "")
+            kw_unaccented = norm_info["normalized_input"]
             cat_unaccented = remove_vietnamese_diacritics(category).lower() if category else ""
             mat_unaccented = remove_vietnamese_diacritics(material).lower() if material else ""
             color_unaccented = remove_vietnamese_diacritics(color).lower() if color else ""
 
-            # Stop phrases filtering
-            stop_phrases = ["toi muon mua", "minh muon mua", "cho minh xem", "cho xem", "co ban", "minh can tim", "toi can tim", "toi tim", "toi can", "chao shop", "shop oi", "xin chao", "cua hang", "cai", "chiec", "bo", "a", "nhi", "khong", "nhe", "co", "tim", "cho"]
+            # Stop phrases filtering (loại bỏ các cụm từ đệm giao tiếp / hỏi han)
+            stop_phrases = [
+                "toi muon mua", "minh muon mua", "cho minh xem", "cho xem", "co ban", "minh can tim",
+                "toi can tim", "toi tim", "toi can", "chao shop", "shop oi", "xin chao", "cua hang",
+                "cai nay", "mau nay", "san pham nay", "cai", "chiec", "bo", "a", "nhi", "khong", "nhe",
+                "co", "tim", "cho", "sp", "san pham", "ben shop", "he thong", "co k", "co ko", "co khong", "k", "ko", "hk", "hok"
+            ]
             for phrase in stop_phrases:
                 kw_unaccented = re.sub(rf'\b{phrase}\b', '', kw_unaccented)
             kw_unaccented = re.sub(r'\s+', ' ', kw_unaccented).strip()
 
             # Trích xuất các từ quan trọng (bỏ qua từ quá ngắn ngoại trừ các số)
             kw_words = [w for w in kw_unaccented.split() if len(w) > 1 or w.isdigit()]
+
+            filtered = []
 
             for p in raw_products:
                 p_name = p.get("name") or ""
@@ -85,6 +104,9 @@ class BusinessEngine:
                 variant_colors = [v.get("color") for v in variants if isinstance(v, dict) and v.get("color")]
                 variant_colors_unaccented = [remove_vietnamese_diacritics(c).lower() for c in variant_colors]
 
+                # Match Score Calculation
+                score = 0.0
+
                 # 1. Match Keyword (tên sản phẩm, danh mục, chất liệu, hoặc màu)
                 if kw_words:
                     matched_words = [
@@ -95,24 +117,47 @@ class BusinessEngine:
                         or any(w in c for c in variant_colors_unaccented)
                     ]
                     
-                    # Nếu người dùng có nhiều từ mô tả cụ thể, tỷ lệ khớp phải cao (ví dụ >= 60%)
+                    if not matched_words:
+                        continue
+
                     match_ratio = len(matched_words) / len(kw_words)
-                    if len(kw_words) == 1 and match_ratio < 1.0:
+                    
+                    # Exact sequence match (e.g. "ban trang diem" in "ban trang diem go soi...")
+                    if kw_unaccented and kw_unaccented in p_name_unaccented:
+                        score = 1.0
+                    elif len(kw_words) == 1 and match_ratio >= 1.0:
+                        score = 0.85
+                    elif len(kw_words) >= 2 and match_ratio >= 0.8:
+                        score = 0.90
+                    elif len(kw_words) >= 2 and match_ratio >= 0.5:
+                        score = 0.65
+                    else:
+                        # Weak match - reject to prevent hallucinating irrelevant products (Mục 17, 18)
                         continue
-                    elif len(kw_words) >= 2 and match_ratio < 0.6:
-                        continue
+                else:
+                    # No keyword given -> general browse
+                    score = 0.70
 
                 # 2. Match Category
-                if cat_unaccented and cat_unaccented not in cat_name_unaccented:
-                    continue
+                if cat_unaccented:
+                    if cat_unaccented in cat_name_unaccented or cat_unaccented in p_name_unaccented:
+                        score = max(score, 0.85)
+                    else:
+                        continue
 
                 # 3. Match Material
-                if mat_unaccented and mat_unaccented not in mat_name_unaccented and mat_unaccented not in p_name_unaccented:
-                    continue
+                if mat_unaccented:
+                    if mat_unaccented in mat_name_unaccented or mat_unaccented in p_name_unaccented:
+                        score = max(score, 0.90)
+                    else:
+                        continue
 
                 # 4. Match Color
-                if color_unaccented and not any(color_unaccented in c for c in variant_colors_unaccented):
-                    continue
+                if color_unaccented:
+                    if any(color_unaccented in c for c in variant_colors_unaccented):
+                        score = max(score, 0.90)
+                    else:
+                        continue
 
                 # 5. Match Price Filter
                 if variant_prices:
@@ -129,17 +174,33 @@ class BusinessEngine:
                 p["dimensions"] = variants[0].get("dimensions") if variants else None
                 p["color"] = variant_colors[0] if variant_colors else None
                 p["sku"] = variants[0].get("sku") if variants else None
+                p["_relevance_score"] = score
 
                 filtered.append(p)
 
             if not filtered:
-                return {"status": "empty", "data": []}
+                return {"status": "empty", "data": [], "match_confidence": "NO_MATCH"}
 
-            return {"status": "success", "data": filtered[:5]}
+            # Sort by relevance score descending
+            filtered.sort(key=lambda x: x.get("_relevance_score", 0), reverse=True)
+            top_score = filtered[0].get("_relevance_score", 0)
+
+            if top_score >= 0.85:
+                confidence_level = "HIGH_CONFIDENCE"
+            elif top_score >= 0.60:
+                confidence_level = "POSSIBLE"
+            else:
+                confidence_level = "WEAK"
+
+            return {
+                "status": "success",
+                "data": filtered[:5],
+                "match_confidence": confidence_level
+            }
 
         except Exception as e:
             logger.error(f"Lỗi khi truy vấn sản phẩm Supabase: {e}")
-            return {"status": "error", "data": [], "error": str(e)}
+            return {"status": "error", "data": [], "match_confidence": "NO_MATCH", "error": str(e)}
 
     def check_attribute_availability(self, product: dict, requested_attribute: str) -> bool:
         if not product or not requested_attribute:
@@ -180,7 +241,13 @@ class BusinessEngine:
                 new_qty = existing.data[0]["quantity"] + quantity
                 self.supabase.table("cart_items").update({"quantity": new_qty}).eq("id", existing.data[0]["id"]).execute()
             else:
-                self.supabase.table("cart_items").insert({"session_id": session_id, "product_variant_sku": sku, "product_name": product_name, "price_at_addition": variant_data["price"], "quantity": quantity}).execute()
+                self.supabase.table("cart_items").insert({
+                    "session_id": session_id,
+                    "product_variant_sku": sku,
+                    "product_name": product_name,
+                    "price_at_addition": variant_data["price"],
+                    "quantity": quantity
+                }).execute()
             return {"status": "success", "message": f"Đã thêm {quantity} {product_name} vào giỏ hàng."}
         except Exception:
             return {"status": "error", "message": "Không thể thêm vào giỏ hàng lúc này, vui lòng thử lại."}
@@ -215,7 +282,13 @@ class BusinessEngine:
             for item in data[:limit]:
                 supplier_obj = item.get("suppliers")
                 biz_name = supplier_obj[0].get("business_name") if isinstance(supplier_obj, list) and supplier_obj else "Xưởng WoodHub"
-                results.append({"id": item.get("id"), "supplier_name": biz_name, "address": f"{item.get('address')}, {item.get('ward')}, {item.get('district')}, {item.get('city')}", "distance": item.get("distance", "N/A"), "type": "store"})
+                results.append({
+                    "id": item.get("id"),
+                    "supplier_name": biz_name,
+                    "address": f"{item.get('address')}, {item.get('ward')}, {item.get('district')}, {item.get('city')}",
+                    "distance": item.get("distance", "N/A"),
+                    "type": "store"
+                })
             return results
         except Exception as e:
             return []
@@ -227,7 +300,12 @@ class BusinessEngine:
         coeff = self.WOOD_COEFFICIENTS.get(wood_type.lower(), 1.0)
         estimated_price = volume_m3 * base_price_per_m3 * coeff
         formatted_price = f"{int(estimated_price):,.0f} VND".replace(",", ".")
-        return {"status": "success", "estimated_price": round(estimated_price, 0), "price_display": formatted_price, "message": f"Với kích thước {w}x{h}x{d}cm và gỗ {wood_type}, giá ước tính là {formatted_price}."}
+        return {
+            "status": "success",
+            "estimated_price": round(estimated_price, 0),
+            "price_display": formatted_price,
+            "message": f"Với kích thước {w}x{h}x{d}cm và gỗ {wood_type}, giá ước tính là {formatted_price}."
+        }
 
     def redirect_to_payment(self) -> dict:
         return {"status": "success", "link": "https://woodhub.id.vn/payment"}
