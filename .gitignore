@@ -8,3 +8,6 @@ venv/
 # Cache của Python
 __pycache__/
 *.pyc
+# Runtime data (audit log)
+var/
+.pytest_cache/
