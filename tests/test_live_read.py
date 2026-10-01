@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.agent.composer import vnd
+from app.domain.messages import NO_PRODUCT
 from app.domain.principal import Role
 from app.main import create_app
 from app.tools.base import AgentProfile
@@ -61,18 +62,18 @@ def test_follow_up_question_uses_conversation_product(loop, agent, truth):
 
 def test_search_with_price_filter_only_returns_real_matching_products(loop, agent, truth):
     r = ask(loop, agent, "Tìm bàn dưới 3 triệu")
-    items = next(b.data for b in r.blocks if b.kind == "product_list")
+    items = next(b.data for b in r.blocks if b.kind == "recommendation")["items"]
     assert items
     active = {p["id"]: p for p in truth.get("products", status="eq.active", select="id,name,product_variants(price)")}
     for it in items:
         assert it["id"] in active, it
         assert min(float(v["price"]) for v in active[it["id"]]["product_variants"]) <= 3_000_000
-        assert vnd(it["price_from"]) in r.message
+        assert it["price"] <= 3_000_000 and vnd(it["price"]) in r.message
 
 
 def test_search_unaccented_input_finds_real_products(loop, agent, truth):
     r = ask(loop, agent, "co giuong go soi khong")
-    items = next(b.data for b in r.blocks if b.kind == "product_list")
+    items = next(b.data for b in r.blocks if b.kind == "recommendation")["items"]
     assert any(i["name"] == "Giường Ngủ Gỗ Sồi Tự Nhiên" for i in items)
 
 
@@ -86,7 +87,7 @@ def test_compare_two_real_products(loop, agent, truth):
 
 def test_unknown_product_is_not_invented(loop, agent):
     r = ask(loop, agent, "Giá ZZX999 bao nhiêu")
-    assert "Không tìm thấy" in r.message and "₫" not in r.message
+    assert r.message == NO_PRODUCT
 
 
 def test_categories_match_supabase(loop, agent, truth):
@@ -108,7 +109,7 @@ def test_branches_match_supabase_stores(loop, agent, truth):
 def test_inventory_for_guest_is_unknown_not_guessed(loop, agent, truth):
     assert truth.get("store_inventory", select="store_id", limit="1") == []  # dữ liệu thật: chưa có tồn kho
     r = ask(loop, agent, "KTV01 còn bao nhiêu cái?")
-    assert "chưa có dữ liệu tồn kho đã xác minh" in r.message.lower()
+    assert r.message == f"- {truth.active_product_named('KTV01')['name']} — chưa có dữ liệu tồn kho"
     assert "còn " not in r.message.split(":", 1)[-1] or "chưa" in r.message
 
 

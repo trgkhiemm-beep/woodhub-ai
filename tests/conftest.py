@@ -188,16 +188,17 @@ class ReadOnlyTransport(httpx.AsyncBaseTransport):
         await self._inner.aclose()
 
 
-def build_live(audit_sink: MemoryAuditSink, *, apply_writes: bool = True, **settings_overrides: Any
-               ) -> tuple[Container, WriteIntercept]:
-    """Container dùng adapter Backend THẬT (transport chỉ-đọc); catalog được bọc WriteIntercept."""
+def build_live(audit_sink: MemoryAuditSink, *, apply_writes: bool = True, llm_client: Any = None,
+               **settings_overrides: Any) -> tuple[Container, WriteIntercept]:
+    """Container dùng adapter Backend THẬT (transport chỉ-đọc); catalog được bọc WriteIntercept.
+    Mặc định NLU chạy rules (không gọi LLM); truyền llm_client để kiểm thử nhánh LLM."""
     settings = make_settings(**settings_overrides)
     base = build_container(settings, audit_sinks=[audit_sink], transport=ReadOnlyTransport())
     intercept = WriteIntercept(base.ports.catalog, apply=apply_writes)
     p = base.ports
     ports = Ports(identity=p.identity, catalog=intercept, inventory=p.inventory, store=p.store,
                   promotions=p.promotions, knowledge=p.knowledge, design=p.design)
-    container = build_container(settings, audit_sinks=[audit_sink], ports=ports)
+    container = build_container(settings, audit_sinks=[audit_sink], ports=ports, llm_client=llm_client)
     container.backend = base.backend  # dùng chung client thật
     return container, intercept
 

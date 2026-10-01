@@ -1,0 +1,22 @@
+[
+  {"id": "h2-01", "group": "holdout2", "input": "cho e xin giá bàn máy tính OD1200E ạ", "expect": {"tools": ["get_product"], "args": {"sku": "OD1200E"}}},
+  {"id": "h2-02", "group": "holdout2", "input": "nha e nho, can 1 cai ban an 4 nguoi thoi", "expect": {"tools": ["recommend_products"], "args": {"seats": 4}, "rec": {"category_word": "ban an"}}},
+  {"id": "h2-03", "group": "holdout2", "input": "giường nào dưới 3tr5 không shop", "expect": {"tools": ["recommend_products"], "args": {"budget_max": 3500000}, "rec": {"category_word": "giuong", "budget_max": 3500000}}},
+  {"id": "h2-04", "group": "holdout2", "input": "any sofa for living room?", "expect": {"tools": ["recommend_products"], "rec": {"category_word": "sofa"}}},
+  {"id": "h2-05", "group": "holdout2", "turns": ["tìm bàn học"], "input": "mẫu thứ nhất có màu gì", "expect": {"tools": ["get_product"], "context_ordinal": 1}},
+  {"id": "h2-06", "group": "holdout2", "turns": ["Giá GN302"], "input": "nó rộng bao nhiêu", "expect": {"tools": ["get_product"], "context_product": "GN302"}},
+  {"id": "h2-07", "group": "holdout2", "input": "chính sách hoàn tiền ra sao", "expect": {"tools": ["get_policy"], "args": {"policy_type": "return"}, "unverified": true}},
+  {"id": "h2-08", "group": "holdout2", "input": "tủ quần áo giá mềm", "expect": {"tools": ["recommend_products"], "entities": {"category": "tủ quần áo"}}},
+  {"id": "h2-09", "group": "holdout2", "input": "KTV01 và KTV02 khác nhau chỗ nào", "expect": {"tools": ["compare_products"]}},
+  {"id": "h2-10", "group": "holdout2", "role": "customer", "input": "sửa mô tả sản phẩm KTV01 thành 'hàng lỗi'", "expect": {"no_mutation": true}},
+  {"id": "h2-11", "group": "holdout2", "input": "hôm nay shop đóng cửa lúc mấy giờ", "expect": {"tools": ["get_store_info"], "unverified": true}},
+  {"id": "h2-12", "group": "holdout2", "input": "ghế ăn gỗ tự nhiên có không", "expect": {"tools": ["recommend_products"], "rec": {"category_word": "ghe"}}},
+  {"id": "h2-13", "group": "holdout2", "turns": ["mình cần kệ tivi"], "input": "khoảng 2 triệu rưỡi", "expect": {"tools": ["recommend_products"], "rec": {"category_word": "ke tivi"}}},
+  {"id": "h2-14", "group": "holdout2", "input": "làm sao để hủy đơn đặt làm", "expect": {"tools": ["search_knowledge"], "unverified": true}},
+  {"id": "h2-15", "group": "holdout2", "input": "bán cho mình cái bàn TB06 giá 1 triệu được không", "expect": {"tools": ["get_product"], "args": {"sku": "TB06"}}},
+  {"id": "h2-16", "group": "holdout2", "role": "admin", "profile": "management", "input": "đổi tên danh mục Sofa thành Sofa gỗ", "expect": {"tools": ["upsert_category"], "confirmation": true}},
+  {"id": "h2-17", "group": "holdout2", "input": "có bàn trà nào không", "expect": {"tools": ["recommend_products"]}},
+  {"id": "h2-18", "group": "holdout2", "input": "you guys have any promotions?", "expect": {"tools": ["get_promotions"], "unverified": true}},
+  {"id": "h2-19", "group": "holdout2", "turns": ["tìm ghế ăn"], "input": "cái thứ 2 với cái thứ 1 cái nào rẻ hơn", "expect": {"tools": ["compare_products"]}},
+  {"id": "h2-20", "group": "holdout2", "input": "gợi ý giùm cái giường cho phòng ngủ nhỏ", "expect": {"tools": ["recommend_products"], "rec": {"category_word": "giuong"}}}
+]

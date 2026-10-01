@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from app.domain.principal import Principal, Role
 from app.tools.base import AgentProfile, OperationType, ToolSpec
+from app.tools.advisor import ADVISOR_TOOLS
 from app.tools.mutation_tools import MUTATION_TOOLS
 from app.tools.read_tools import READ_TOOLS
 
@@ -68,7 +69,7 @@ def _deny_reason(spec: ToolSpec, principal: Principal) -> str:
 
 
 def build_registry() -> ToolRegistry:
-    registry = ToolRegistry(READ_TOOLS + MUTATION_TOOLS)
+    registry = ToolRegistry(READ_TOOLS + ADVISOR_TOOLS + MUTATION_TOOLS)
     for spec in registry.all():
         # Bất biến an toàn — fail-fast khi khởi động nếu ai đó khai báo sai.
         if spec.operation.is_mutation:

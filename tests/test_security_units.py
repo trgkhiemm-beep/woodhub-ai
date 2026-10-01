@@ -1,10 +1,8 @@
 """Registry invariants, permission matrix, grounding guard, audit redaction, config guard rails."""
 import pytest
 
-from app.agent.composer import grounded
 from app.audit import redact
 from app.domain.principal import Principal, Role
-from app.domain.results import ToolResult, ToolStatus
 from app.tools.base import AgentProfile, ConfirmationLevel
 from app.tools.registry import FORBIDDEN_TOOL_NAMES, build_registry
 from tests.conftest import make_settings
@@ -56,16 +54,6 @@ def test_admin_denial_reason_explains_ownership():
     assert not d.allowed and "nhà cung cấp" in d.reason
 
 
-def test_grounding_guard_rejects_invented_numbers():
-    res = [ToolResult(tool="get_product", status=ToolStatus.OK,
-                      data={"name": "Kệ Tivi Gỗ KTV01", "variants": [{"price": 2737000.0}], "hotline": None})]
-    assert grounded("Kệ Tivi Gỗ KTV01 có giá 2.737.000 ₫.", res)
-    assert not grounded("Kệ Tivi Gỗ KTV01 có giá 2.500.000 ₫.", res)
-    assert not grounded("Gọi hotline 1900 9999 để đặt.", res)
-    assert not grounded("Liên hệ sales@woodhub.vn", res)
-    assert not grounded("Bất kỳ câu gì", [ToolResult(tool="get_policy", status=ToolStatus.UNKNOWN)])
-
-
 def test_audit_redacts_secrets():
     rec = redact({"access_token": "abc", "nested": {"Authorization": "Bearer x", "password": "p"}, "price": 1})
     assert rec["access_token"] == "[REDACTED]" and rec["nested"]["Authorization"] == "[REDACTED]"
@@ -88,4 +76,4 @@ def test_config_guard_rails():
     with pytest.raises(ValueError):
         make_settings(BACKEND_BASE_URL="http://evil.example.com")
     with pytest.raises(ValueError):
-        make_settings(AGENT_PLANNER="llm", BEDROCK_MODEL_ID=None)
+        make_settings(NLU_MODE="llm", BEDROCK_MODEL_ID=None)

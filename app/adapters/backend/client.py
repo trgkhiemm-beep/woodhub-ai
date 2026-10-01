@@ -54,6 +54,7 @@ class BackendClient:
         self._base_url = base_url.rstrip("/")
         self._max_retries = max_retries
         self._backoff_base = backoff_base
+        self.stats = {"requests": 0}  # metadata cho observability/evaluation
         self._client = httpx.AsyncClient(base_url=self._base_url, timeout=timeout, transport=transport,
                                          headers={"Accept": "application/json"})
 
@@ -82,6 +83,7 @@ class BackendClient:
         last_exc: errors.PortError | None = None
         for attempt in range(attempts):
             try:
+                self.stats["requests"] += 1
                 resp = await self._client.request(method, path, params=clean_params, json=json, headers=headers)
             except httpx.TimeoutException as exc:
                 last_exc = errors.UpstreamTimeout("Backend phản hồi quá thời gian.", detail=f"{method} {path}: {exc!r}")

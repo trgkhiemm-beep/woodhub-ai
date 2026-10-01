@@ -6,10 +6,10 @@ from typing import Literal
 from pydantic import Field
 
 from app.domain import errors
-from app.domain.models import Freshness, KnowledgeKind, NamedRef, PolicyType, PromotionStatus, SearchCriteria
+from app.domain.models import Freshness, KnowledgeKind, NamedRef, PolicyType, PromotionStatus
 from app.domain.principal import Role
 from app.domain.results import ToolResult, ToolStatus
-from app.nlp.vietnamese import remove_vietnamese_diacritics, restore_diacritics_for_search
+from app.nlp.vietnamese import remove_vietnamese_diacritics
 from app.tools.base import OperationType, ToolContext, ToolInput, ToolSpec
 from app.tools.common import ProductRef, error_result, pick_variant, remember_product, resolve_product
 
@@ -82,63 +82,6 @@ async def find_nearby_workshops(args: WorkshopInput, ctx: ToolContext) -> ToolRe
 
 
 # ---------------- Catalog ----------------
-class SearchProductsInput(ToolInput):
-    keyword: str | None = Field(default=None, max_length=120)
-    category: str | None = Field(default=None, max_length=80)
-    material: str | None = Field(default=None, max_length=80)
-    min_price: float | None = Field(default=None, ge=0, le=10_000_000_000)
-    max_price: float | None = Field(default=None, ge=0, le=10_000_000_000)
-    room: str | None = Field(default=None, max_length=60)
-    style: str | None = Field(default=None, max_length=60)
-    available_only: bool = False
-    page: int = Field(default=0, ge=0, le=50)
-
-
-async def search_products(args: SearchProductsInput, ctx: ToolContext) -> ToolResult:
-    if args.min_price is not None and args.max_price is not None and args.min_price > args.max_price:
-        return ToolResult(tool="search_products", status=ToolStatus.INVALID, message="Khoảng giá không hợp lệ.")
-    catalog = ctx.ports.catalog
-    try:
-        category_id = material_id = None
-        keyword = args.keyword
-        if args.category:
-            cat = match_named(await catalog.list_categories(ctx.principal), args.category)
-            if cat:
-                category_id = cat.id
-            else:
-                keyword = " ".join(x for x in (args.category, keyword) if x)
-        if args.material:
-            mat = match_named(await catalog.list_materials(ctx.principal), args.material)
-            if mat:
-                material_id = mat.id
-            else:
-                keyword = " ".join(x for x in (keyword, args.material) if x)
-        criteria = SearchCriteria(
-            keyword=restore_diacritics_for_search(keyword) if keyword else None, category_id=category_id,
-            material_id=material_id, min_price=args.min_price, max_price=args.max_price, room=args.room,
-            style=args.style, available_only=args.available_only, page=args.page, size=10,
-        )
-        page = await catalog.search_products(criteria, ctx.principal)
-        relaxed_from = None
-        words = (criteria.keyword or "").split()
-        if not page.items and len(words) > 1:
-            # Backend khớp keyword như một cụm liền nhau → nới lỏng: danh mục hoặc danh từ chính.
-            head = words[0]
-            cat = None if criteria.category_id else match_named(await catalog.list_categories(ctx.principal), head)
-            relaxed = criteria.model_copy(update={"keyword": None if cat else head,
-                                                  "category_id": cat.id if cat else criteria.category_id})
-            page = await catalog.search_products(relaxed, ctx.principal)
-            if page.items:
-                relaxed_from, criteria = criteria.keyword, relaxed
-    except errors.PortError as exc:
-        return error_result("search_products", exc)
-    data = {"items": [p.model_dump() for p in page.items], "total": page.total, "page": page.page,
-            "criteria": criteria.model_dump(exclude_none=True), "relaxed_from": relaxed_from}
-    return ToolResult(tool="search_products", status=ToolStatus.OK if page.items else ToolStatus.NOT_FOUND, data=data,
-                      message=None if page.items else "Không tìm thấy sản phẩm phù hợp tiêu chí.",
-                      sources=[ctx.source("products.search", Freshness.REALTIME, system=catalog.source_system)])
-
-
 class GetProductInput(ProductRef):
     pass
 
@@ -159,21 +102,24 @@ async def get_product(args: GetProductInput, ctx: ToolContext) -> ToolResult:
 
 
 class CompareInput(ToolInput):
-    skus: list[str] = Field(min_length=2, max_length=3)
+    products: list[ProductRef] = Field(min_length=2, max_length=3)
 
 
 async def compare_products(args: CompareInput, ctx: ToolContext) -> ToolResult:
     rows = []
-    for sku in args.skus:
-        product = await resolve_product("compare_products", ProductRef(sku=sku), ctx)
+    for ref in args.products:
+        product = await resolve_product("compare_products", ref, ctx)
         if isinstance(product, ToolResult):
             return product
-        v = pick_variant(product, sku)
-        rows.append({"sku": sku, "name": product.name, "material": product.material, "category": product.category,
-                     "price": v.price if v else None, "dimensions": v.dimensions if v else None,
+        v = pick_variant(product, ref.sku)
+        prices = product.price_range
+        rows.append({"code": ref.sku, "name": product.name, "material": product.material, "category": product.category,
+                     "price": v.price if v else (prices[0] if prices else None),
+                     "dimensions": v.dimensions if v else next((x.dimensions for x in product.variants if x.dimensions), None),
                      "color": v.color if v else None, "product_id": product.id})
     return ToolResult(tool="compare_products", status=ToolStatus.OK, data={"rows": rows},
-                      sources=[ctx.source("products", Freshness.REALTIME, system=ctx.ports.catalog.source_system)])
+                      sources=[ctx.source("products", Freshness.REALTIME, system=ctx.ports.catalog.source_system,
+                                          record_id=r["product_id"]) for r in rows])
 
 
 class InventoryInput(ProductRef):
@@ -299,13 +245,10 @@ READ_TOOLS: list[ToolSpec] = [
     ToolSpec("find_nearby_workshops", "Tìm xưởng gia công gần vị trí khách (vị trí lấy từ thiết bị, cần đăng nhập).",
              WorkshopInput, OperationType.READ, AUTHENTICATED, "low", "Backend /api/stores/nearby/workshops",
              read_handler=find_nearby_workshops, requires_auth=True),
-    ToolSpec("search_products", "Tìm sản phẩm theo từ khóa, danh mục, chất liệu, khoảng giá (VND), phòng, phong cách.",
-             SearchProductsInput, OperationType.SEARCH, ALL_ROLES, "low", "Backend /api/products",
-             read_handler=search_products),
     ToolSpec("get_product", "Chi tiết một sản phẩm (giá theo biến thể, kích thước, màu, chất liệu, ảnh) theo SKU, id hoặc tên.",
              GetProductInput, OperationType.REALTIME, ALL_ROLES, "low", "Backend /api/products/{id}",
              read_handler=get_product),
-    ToolSpec("compare_products", "So sánh 2-3 sản phẩm theo SKU.", CompareInput, OperationType.READ, ALL_ROLES, "low",
+    ToolSpec("compare_products", "So sánh 2-3 sản phẩm (mã hoặc id).", CompareInput, OperationType.READ, ALL_ROLES, "low",
              "Backend /api/products/{id}", read_handler=compare_products),
     ToolSpec("get_inventory", "Tồn kho realtime của sản phẩm/biến thể.", InventoryInput, OperationType.REALTIME,
              ALL_ROLES, "low", "Backend /api/variants/{id}/inventory (supplier) · GAP B.3 (công khai)",

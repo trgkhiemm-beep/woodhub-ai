@@ -12,11 +12,13 @@ from app.adapters.backend.adapters import (
 from app.adapters.backend.client import BackendClient
 from app.agent.actions import ActionService, InMemoryActionRepository
 from app.agent.executor import ToolExecutor
-from app.agent.llm import BedrockConverseClient, LLMClient, LLMPlanner
 from app.agent.orchestrator import AgentService
 from app.agent.session import SessionStore
 from app.audit import AuditLogger, AuditSink, JsonlAuditSink
-from app.config import PlannerMode, Settings
+from app.config import Settings
+from app.nlu.engine import NLUEngine
+from app.nlu.lexicon import Lexicon
+from app.nlu.llm import BedrockConverseClient, LLMClient, LLMIntentClassifier
 from app.ports import Ports
 from app.tools.registry import ToolRegistry, build_registry
 
@@ -52,15 +54,16 @@ def build_container(settings: Settings, *, transport: httpx.AsyncBaseTransport |
     audit = AuditLogger(audit_sinks if audit_sinks is not None else [JsonlAuditSink(settings.AUDIT_LOG_PATH)])
     actions = ActionService(InMemoryActionRepository(), registry, audit, settings)
     executor = ToolExecutor(registry, actions, audit)
-    llm = None
-    if settings.AGENT_PLANNER == PlannerMode.LLM:
+    classifier = None
+    if llm_client is not None or settings.llm_enabled:
         client = llm_client or BedrockConverseClient(
             model_id=settings.BEDROCK_MODEL_ID or "", region=settings.AWS_DEFAULT_REGION,
             access_key=settings.AWS_ACCESS_KEY_ID.get_secret_value() if settings.AWS_ACCESS_KEY_ID else None,
             secret_key=settings.AWS_SECRET_ACCESS_KEY.get_secret_value() if settings.AWS_SECRET_ACCESS_KEY else None,
             timeout=settings.LLM_TIMEOUT_SECONDS, max_tokens=settings.LLM_MAX_TOKENS,
         )
-        llm = LLMPlanner(client, executor, settings.MAX_TOOL_CALLS_PER_TURN)
+        classifier = LLMIntentClassifier(client)
     agent = AgentService(settings=settings, ports=ports, registry=registry, executor=executor, actions=actions,
-                         sessions=SessionStore(settings.SESSION_TTL_SECONDS, settings.MAX_SESSIONS), audit=audit, llm=llm)
+                         sessions=SessionStore(settings.SESSION_TTL_SECONDS, settings.MAX_SESSIONS), audit=audit,
+                         nlu=NLUEngine(Lexicon(), classifier))
     return Container(settings=settings, backend=backend, ports=ports, registry=registry, audit=audit, actions=actions, agent=agent)

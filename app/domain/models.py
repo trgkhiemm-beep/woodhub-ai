@@ -27,6 +27,7 @@ class SourceRef(BaseModel):
     fetched_at: datetime
     record_id: str | None = None
     version: str | None = None
+    verified: bool = True
 
 
 # ---------------- Catalog ----------------
@@ -92,7 +93,7 @@ class SearchCriteria(BaseModel):
     style: str | None = None
     available_only: bool = False
     page: int = Field(default=0, ge=0)
-    size: int = Field(default=10, ge=1, le=20)
+    size: int = Field(default=10, ge=1, le=50)
 
 
 class NamedRef(BaseModel):

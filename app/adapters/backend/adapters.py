@@ -4,7 +4,7 @@ Adapter REAL cho WoodHub Backend.
 Chỉ dùng các endpoint đã kiểm chứng trong OpenAPI snapshot. Năng lực mà Backend CHƯA có
 (thông tin cửa hàng, promotion, policy/FAQ, tồn kho công khai, tra SKU trực tiếp) ném
 CapabilityUnavailable — Agent sẽ trả "chưa có thông tin đã xác minh" thay vì bịa.
-Xem docs/BACKEND_INTEGRATION_SPEC.md (Phần B) cho contract đề xuất của các GAP này.
+Xem docs/BACKEND_INTEGRATION.md (Phần B) cho contract đề xuất của các GAP này.
 """
 from __future__ import annotations
 
@@ -82,9 +82,12 @@ class BackendIdentityAdapter:
 class BackendCatalogAdapter:
     source_system = "backend"
 
-    def __init__(self, client: BackendClient, sku_scan_max_products: int = 40):
+    def __init__(self, client: BackendClient, sku_scan_max_products: int = 40, taxonomy_ttl_seconds: int = 600):
         self._client = client
         self._sku_scan_max = sku_scan_max_products
+        self._taxonomy_ttl = taxonomy_ttl_seconds
+        self._taxonomy_cache: dict[str, tuple[float, list[NamedRef]]] = {}
+        self.cache_hits = 0
 
     async def search_products(self, criteria: SearchCriteria, principal: Principal) -> ProductPage:
         params = {
@@ -137,9 +140,17 @@ class BackendCatalogAdapter:
         raise errors.NotFound(f"Không tìm thấy sản phẩm có mã {sku}.")
 
     async def _named(self, path: str, principal: Principal) -> list[NamedRef]:
+        # Danh mục/chất liệu/phòng/phong cách là dữ liệu tĩnh, công khai → cache TTL ngắn (giá/tồn kho KHÔNG cache).
+        hit = self._taxonomy_cache.get(path)
+        if hit and hit[0] > time.monotonic():
+            self.cache_hits += 1
+            return hit[1]
         data = require_list(await self._client.request("GET", path, principal), path)
-        return [NamedRef(id=str(x["id"]), name=x["name"], slug=x.get("slug"), parent_id=x.get("parentId"),
-                         updated_at=x.get("createdAt")) for x in data if isinstance(x, dict) and x.get("id")]
+        items = [NamedRef(id=str(x["id"]), name=x["name"], slug=x.get("slug"), parent_id=x.get("parentId"),
+                          updated_at=x.get("createdAt")) for x in data if isinstance(x, dict) and x.get("id")]
+        if self._taxonomy_ttl:
+            self._taxonomy_cache[path] = (time.monotonic() + self._taxonomy_ttl, items)
+        return items
 
     async def list_categories(self, principal: Principal) -> list[NamedRef]:
         return await self._named("/api/categories", principal)
@@ -171,6 +182,7 @@ class BackendCatalogAdapter:
 
     async def upsert_category(self, category_id: str | None, name: str, parent_id: str | None, principal: Principal) -> NamedRef:
         body = {"name": name, "parentId": parent_id}
+        self._taxonomy_cache.clear()
         if category_id:
             dto = await self._client.request("PUT", f"/api/categories/{category_id}", principal, json=body)
         else:
@@ -179,6 +191,7 @@ class BackendCatalogAdapter:
         return NamedRef(id=str(dto["id"]), name=dto["name"], slug=dto.get("slug"), parent_id=dto.get("parentId"))
 
     async def upsert_material(self, material_id: str | None, name: str, principal: Principal) -> NamedRef:
+        self._taxonomy_cache.clear()
         if material_id:
             dto = await self._client.request("PUT", f"/api/materials/{material_id}", principal, json={"name": name})
         else:

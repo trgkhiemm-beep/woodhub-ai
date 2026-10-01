@@ -37,8 +37,8 @@ def create_app(settings: Settings | None = None, container: Container | None = N
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        logger.info("WoodHub AI Agent start | env=%s planner=%s backend=%s", settings.APP_ENV.value,
-                    settings.AGENT_PLANNER.value, settings.BACKEND_BASE_URL)
+        logger.info("WoodHub AI Agent start | env=%s nlu=%s llm=%s backend=%s", settings.APP_ENV.value,
+                    settings.NLU_MODE.value, settings.llm_enabled, settings.BACKEND_BASE_URL)
         yield
         await app.state.container.aclose()
 

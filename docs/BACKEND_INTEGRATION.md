@@ -1,4 +1,4 @@
-# BACKEND_INTEGRATION_SPEC — WoodHub AI Service ↔ Backend (rev 4 — implemented adapters)
+# BACKEND_INTEGRATION — WoodHub AI Service ↔ Backend (v1.1)
 
 > **Rev 3 (2026-09-30):** đối chiếu với OpenAPI thật của Backend tại `https://woodhub-be.onrender.com/v3/api-docs` (Swagger UI: `/swagger-ui/index.html`), 156 operation, và một số GET ẩn danh (không ghi dữ liệu).
 >
@@ -34,7 +34,7 @@ Adapter: `app/adapters/backend/` · Allowlist: `app/adapters/backend/client.py::
 Khi Backend làm xong một GAP ở Phần B: chỉ sửa method tương ứng trong `adapters.py` + thêm dòng allowlist; agent core, tools, contract Frontend không đổi.
 
 ### Việc team Backend cần làm (ưu tiên)
-1. **B-2** — chuyển luồng `/api/ai-chat/sessions/{id}/messages` sang gọi `POST {AI}/v1/agent/chat` (hoặc `/v1/agent/manage/chat` cho admin/supplier), **forward header `Authorization`** của người dùng, đọc `message` + `blocks` (map `product_list`/`product_detail` → `suggestedProducts`). `/chat` cũ vẫn chạy trong giai đoạn chuyển tiếp.
+1. **B-2** — chuyển luồng `/api/ai-chat/sessions/{id}/messages` sang gọi `POST {AI}/v1/agent/chat` (hoặc `/v1/agent/manage/chat` cho admin/supplier), **forward header `Authorization`** của người dùng, đọc `message` + `blocks` (map `recommendation.items`/`product_detail` → `suggestedProducts`). `/chat` cũ vẫn chạy trong giai đoạn chuyển tiếp.
 2. **B-1** — xác nhận `GET /api/users/me` là cách verify token được chấp nhận (hoặc cung cấp public key/JWKS để bỏ 1 request/lượt).
 3. **B-3** — trả **401** cho token thiếu/hết hạn (hiện 403) và đánh dấu endpoint công khai trong OpenAPI.
 4. GAP B.1 (platform info), B.6 (promotion), B.7 (policy/FAQ/knowledge search), B.3 (tồn kho công khai), B.9 (audit API), B.2 (tra SKU); bổ sung SKU cho 26/27 biến thể đang `NULL`.

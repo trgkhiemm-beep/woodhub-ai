@@ -7,6 +7,7 @@ import re
 from pydantic import Field, model_validator
 
 from app.domain import errors
+from app.domain.messages import NO_PRODUCT, PRODUCT_API_ERROR, PRODUCT_TOOLS, SYSTEM_ERROR
 from app.domain.models import Product, SearchCriteria, Variant
 from app.domain.results import ToolResult, ToolStatus
 from app.nlp.vietnamese import restore_diacritics_for_search
@@ -20,15 +21,17 @@ SKU_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_\-]{1,49}$"
 def error_result(tool: str, exc: errors.PortError) -> ToolResult:
     """Không lộ chi tiết kỹ thuật cho người dùng; chi tiết chỉ vào log."""
     logger.warning("tool=%s port_error=%s detail=%s", tool, exc.code, (exc.detail or "")[:300])
+    product = tool in PRODUCT_TOOLS
     if isinstance(exc, errors.NotFound):
-        return ToolResult(tool=tool, status=ToolStatus.NOT_FOUND, message=exc.message, error_code=exc.code)
+        return ToolResult(tool=tool, status=ToolStatus.NOT_FOUND, message=NO_PRODUCT if product else exc.message,
+                          error_code=exc.code)
     if isinstance(exc, errors.CapabilityUnavailable):
         return ToolResult(tool=tool, status=ToolStatus.UNKNOWN, message=exc.message, error_code=exc.code)
     if isinstance(exc, (errors.Forbidden, errors.Unauthenticated)):
         return ToolResult(tool=tool, status=ToolStatus.DENIED, message=exc.message, error_code=exc.code)
     if isinstance(exc, (errors.ValidationFailed, errors.Conflict)):
         return ToolResult(tool=tool, status=ToolStatus.INVALID, message=exc.message, error_code=exc.code)
-    return ToolResult(tool=tool, status=ToolStatus.ERROR, message="Hệ thống dữ liệu tạm thời không phản hồi, vui lòng thử lại sau.",
+    return ToolResult(tool=tool, status=ToolStatus.ERROR, message=PRODUCT_API_ERROR if product else SYSTEM_ERROR,
                       error_code=exc.code)
 
 
@@ -60,12 +63,12 @@ async def _find_by_code(code: str, ctx: ToolContext) -> Product:
     catalog = ctx.ports.catalog
     page = await catalog.search_products(SearchCriteria(keyword=code, size=5), ctx.principal)
     named = [p for p in page.items if re.search(rf"(?<![A-Za-z0-9]){re.escape(code)}(?![A-Za-z0-9])", p.name, re.IGNORECASE)]
+    if len(named) == 1:  # mã model trong tên (trường hợp phổ biến) → chỉ 1 lần đọc chi tiết
+        return await catalog.get_product(named[0].id, ctx.principal)
     for summary in page.items:
         product = await catalog.get_product(summary.id, ctx.principal)
         if product.variant_by_sku(code):
             return product
-    if len(named) == 1:
-        return await catalog.get_product(named[0].id, ctx.principal)
     return await catalog.find_product_by_sku(code, ctx.principal)
 
 
@@ -80,7 +83,7 @@ async def resolve_product(tool: str, ref: ProductRef, ctx: ToolContext) -> Produ
             page = await catalog.search_products(
                 SearchCriteria(keyword=restore_diacritics_for_search(ref.name), size=5), ctx.principal)
             if not page.items:
-                return ToolResult(tool=tool, status=ToolStatus.NOT_FOUND, message=f"Không tìm thấy sản phẩm '{ref.name}'.")
+                return ToolResult(tool=tool, status=ToolStatus.NOT_FOUND, message=NO_PRODUCT)
             if len(page.items) > 1:
                 return ToolResult(tool=tool, status=ToolStatus.NEEDS_INPUT,
                                   message="Có nhiều sản phẩm phù hợp, bạn muốn hỏi sản phẩm nào?",

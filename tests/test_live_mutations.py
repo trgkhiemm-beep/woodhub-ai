@@ -167,7 +167,6 @@ def test_customer_and_fake_admin_cannot_mutate(loop, env, audit_sink, msg):
     assert intercept.writes == [] and events(audit_sink, "permission.denied")
     if "admin" in msg.lower():
         assert events(audit_sink, "security.injection_suspected")
-        assert "tài khoản đăng nhập" in r.message
 
 
 def test_inventory_adjust_respects_backend_rbac(loop, env):

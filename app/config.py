@@ -20,9 +20,10 @@ class AppEnv(str, Enum):
     PRODUCTION = "production"
 
 
-class PlannerMode(str, Enum):
-    RULES = "rules"  # planner deterministic (mặc định, không cần LLM)
-    LLM = "llm"      # Bedrock Converse tool-use, fallback về rules khi lỗi
+class NLUMode(str, Enum):
+    AUTO = "auto"    # dùng LLM nếu có BEDROCK_MODEL_ID + AWS key, ngược lại rules
+    LLM = "llm"      # LLM phân loại ý (Bedrock Converse) + trích xuất deterministic; lỗi → rules
+    RULES = "rules"  # chỉ bộ phân loại dự phòng
 
 
 class Settings(BaseSettings):
@@ -42,7 +43,7 @@ class Settings(BaseSettings):
     IDENTITY_CACHE_SECONDS: int = Field(default=60, ge=0, le=900)
 
     # --- Agent ---
-    AGENT_PLANNER: PlannerMode = PlannerMode.RULES
+    NLU_MODE: NLUMode = NLUMode.AUTO
     MAX_MESSAGE_CHARS: int = Field(default=2000, ge=50, le=10000)
     MAX_TOOL_CALLS_PER_TURN: int = Field(default=6, ge=1, le=20)
     SESSION_TTL_SECONDS: int = Field(default=1800, ge=60)
@@ -71,8 +72,8 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: SecretStr | None = None
     AWS_DEFAULT_REGION: str = "us-east-1"
     BEDROCK_MODEL_ID: str | None = None
-    LLM_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0, le=120)
-    LLM_MAX_TOKENS: int = Field(default=600, ge=64, le=4096)
+    LLM_TIMEOUT_SECONDS: float = Field(default=12.0, gt=0, le=120)
+    LLM_MAX_TOKENS: int = Field(default=150, ge=64, le=4096)  # NLU chỉ trả JSON ngắn
 
     @property
     def cors_origins_list(self) -> list[str]:
@@ -90,9 +91,15 @@ class Settings(BaseSettings):
             raise ValueError("Thiếu BACKEND_BASE_URL (vd https://woodhub-be.onrender.com).")
         if not self.BACKEND_BASE_URL.startswith(("https://", "http://localhost", "http://127.0.0.1")):
             raise ValueError("BACKEND_BASE_URL phải dùng https (trừ localhost).")
-        if self.AGENT_PLANNER == PlannerMode.LLM and not self.BEDROCK_MODEL_ID:
-            raise ValueError("AGENT_PLANNER=llm cần BEDROCK_MODEL_ID.")
+        if self.NLU_MODE == NLUMode.LLM and not self.BEDROCK_MODEL_ID:
+            raise ValueError("NLU_MODE=llm cần BEDROCK_MODEL_ID.")
         return self
+
+    @property
+    def llm_enabled(self) -> bool:
+        if self.NLU_MODE == NLUMode.RULES:
+            return False
+        return bool(self.BEDROCK_MODEL_ID and (self.NLU_MODE == NLUMode.LLM or self.AWS_ACCESS_KEY_ID))
 
 
 @lru_cache(maxsize=1)

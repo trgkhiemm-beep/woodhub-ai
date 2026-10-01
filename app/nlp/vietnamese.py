@@ -34,13 +34,7 @@ QUESTION_PARTICLES = {
     "k", "ko", "kh", "khong", "hok", "hk", "hem", "hong", "hông", "k0", "kjo", "hơm", "hổng"
 }
 
-# Conversational fillers & emoticons to strip during token analysis
-CONVERSATIONAL_FILLERS = {
-    "ah", "ạ", "ơi", "oi", "shop", "shop ơi", "shop oi", "nha", "nhé", "nhe", "ha", "hen", "nè", "ne",
-    "ad", "admin", "nhe shop", "nha shop", "ạ shop", "a shop", "với", "voi", "giúp", "giup", "mình với",
-    "cho e", "cho em", "cho anh", "cho c", "cho chị"
-}
-
+# Emoticons to strip during token analysis
 EMOTICON_PATTERNS = [
     r':\)+', r':\(+', r':\-?\)+', r':\-?\(+', r'\^\^+', r':v', r':3', r':D', r'xD', r'<3',
     r'hihi', r'haha', r'hehe', r'huhu', r'keke', r'hic'

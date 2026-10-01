@@ -33,7 +33,7 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
 
 
 def fmt_vnd(value: float | None) -> str:
-    return "không rõ" if value is None else f"{value:,.0f} ₫".replace(",", ".")
+    return "không rõ" if value is None else f"{value:,.0f}đ".replace(",", ".")
 
 
 # =====================================================================

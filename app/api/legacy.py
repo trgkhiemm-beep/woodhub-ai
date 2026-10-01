@@ -42,9 +42,9 @@ def _event(payload: dict) -> str:
 def _products(resp: AgentResponse) -> list[dict]:
     items: list[dict] = []
     for b in resp.blocks:
-        if b.kind == "product_list":
-            items += [{"id": p["id"], "name": p["name"], "description": None, "price": p.get("price_from"),
-                       "status": p.get("status"), "image_url": p.get("image_url")} for p in b.data]
+        if b.kind == "recommendation":
+            items += [{"id": p["id"], "name": p["name"], "description": None, "price": p.get("price"),
+                       "status": "active", "image_url": p.get("image_url")} for p in b.data["items"]]
         elif b.kind == "product_detail":
             pr = b.data.get("price_range") or [None]
             items.append({"id": b.data["id"], "name": b.data["name"], "description": b.data.get("description"),

@@ -13,14 +13,14 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from app.domain.principal import Principal
-from app.tools.base import ConversationContext
+from app.agent.dialogue import DialogueState
 
 
 @dataclass
 class Session:
     id: str
     owner: str
-    conversation: ConversationContext = field(default_factory=ConversationContext)
+    conversation: DialogueState = field(default_factory=DialogueState)
     expires_at: float = 0.0
 
 

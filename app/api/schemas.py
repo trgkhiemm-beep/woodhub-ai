@@ -15,7 +15,7 @@ CONTRACT_VERSION = "1.0"
 
 ResponseType = Literal["answer", "clarification", "confirmation_required", "action_result", "error"]
 BlockKind = Literal[
-    "product_list", "product_detail", "product_comparison", "inventory", "store_info", "branch_list",
+    "recommendation", "product_detail", "product_comparison", "inventory", "store_info", "branch_list",
     "workshop_list", "promotion_list", "policy", "knowledge", "taxonomy", "design_task", "candidates",
 ]
 
@@ -52,6 +52,7 @@ class SourceOut(BaseModel):
     fetched_at: datetime
     record_id: str | None = None
     version: str | None = None
+    verified: bool = Field(default=True, description="True: đọc trực tiếp từ source of truth trong lượt này.")
 
 
 class Block(BaseModel):
@@ -103,8 +104,9 @@ class MetaOut(BaseModel):
     contract_version: str = CONTRACT_VERSION
     profile: Literal["customer", "management"]
     role: Literal["guest", "customer", "supplier", "admin"]
-    planner: Literal["rules", "llm"]
+    planner: Literal["rules", "llm"] = Field(description="NLU: 'llm' = LLM phân loại ý + code trích xuất; 'rules' = dự phòng.")
     tools_used: list[str] = Field(default_factory=list)
+    intents: list[str] = Field(default_factory=list, description="Các ý người dùng mà agent nhận diện trong lượt này.")
     data_source: Literal["backend"] = "backend"
 
 
