@@ -18,7 +18,10 @@
 | POST | `/chat` | **DEPRECATED** — định dạng cũ, xem §8 | tùy chọn |
 
 ## 2. Auth & role
-- Gửi nguyên access token Backend: `Authorization: Bearer <token>`. AI service xác thực qua `GET /api/users/me` của Backend (cache 60 giây).
+- Gửi nguyên access token Backend: `Authorization: Bearer <token>`. AI service verify chữ ký HS256 bằng `BACKEND_JWT_SECRET`
+  (= `JWT_SECRET` của Backend) và hạn `exp`; danh tính = claim `sub` (email), role = claim `role`. Chưa cấu hình secret →
+  dự phòng xác thực qua `GET /api/users/me`.
+- Endpoint quản trị (`/manage/chat*`, `/actions/*`): thiếu/sai/hết hạn token → **401**; role khác admin/supplier → **403**.
 - Không token → guest. Token sai/hết hạn → **401** (không tự hạ xuống guest).
 - **Không gửi role/user_id trong body** — không có field nào như vậy; role chỉ lấy từ token.
 

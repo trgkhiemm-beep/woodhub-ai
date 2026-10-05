@@ -1,6 +1,7 @@
 """Composition root: nối adapter → ports → tools → agent. Nơi DUY NHẤT biết implementation cụ thể."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import httpx
@@ -10,6 +11,7 @@ from app.adapters.backend.adapters import (
     BackendKnowledgeAdapter, BackendPromotionAdapter, BackendStoreAdapter,
 )
 from app.adapters.backend.client import BackendClient
+from app.adapters.backend.jwt_identity import JwtIdentityAdapter
 from app.agent.actions import ActionService, InMemoryActionRepository
 from app.agent.executor import ToolExecutor
 from app.agent.orchestrator import AgentService
@@ -19,8 +21,10 @@ from app.config import Settings
 from app.nlu.engine import NLUEngine
 from app.nlu.lexicon import Lexicon
 from app.nlu.llm import BedrockConverseClient, LLMClient, LLMIntentClassifier
-from app.ports import Ports
+from app.ports import IdentityPort, Ports
 from app.tools.registry import ToolRegistry, build_registry
+
+logger = logging.getLogger("woodhub.auth")
 
 
 @dataclass
@@ -37,6 +41,15 @@ class Container:
         await self.backend.aclose()
 
 
+def _identity(settings: Settings, backend: BackendClient) -> IdentityPort:
+    """Có BACKEND_JWT_SECRET → verify JWT HS256 tại chỗ; không có → dự phòng hỏi Backend GET /api/users/me."""
+    if settings.BACKEND_JWT_SECRET is not None and settings.BACKEND_JWT_SECRET.get_secret_value():
+        return JwtIdentityAdapter(settings.BACKEND_JWT_SECRET.get_secret_value(),
+                                  leeway_seconds=settings.BACKEND_JWT_LEEWAY_SECONDS)
+    logger.warning("Chưa cấu hình BACKEND_JWT_SECRET → xác thực token qua Backend GET /api/users/me")
+    return BackendIdentityAdapter(backend, settings.IDENTITY_CACHE_SECONDS)
+
+
 def build_container(settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None,
                     audit_sinks: list[AuditSink] | None = None, llm_client: LLMClient | None = None,
                     ports: Ports | None = None) -> Container:
@@ -44,7 +57,7 @@ def build_container(settings: Settings, *, transport: httpx.AsyncBaseTransport |
     backend = BackendClient(settings.BACKEND_BASE_URL, timeout=settings.BACKEND_TIMEOUT_SECONDS,
                             max_retries=settings.BACKEND_MAX_RETRIES, transport=transport)
     ports = ports or Ports(
-        identity=BackendIdentityAdapter(backend, settings.IDENTITY_CACHE_SECONDS),
+        identity=_identity(settings, backend),
         catalog=BackendCatalogAdapter(backend, settings.SKU_SCAN_MAX_PRODUCTS),
         inventory=BackendInventoryAdapter(backend), store=BackendStoreAdapter(backend),
         promotions=BackendPromotionAdapter(backend), knowledge=BackendKnowledgeAdapter(backend),

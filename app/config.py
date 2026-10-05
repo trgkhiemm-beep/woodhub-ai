@@ -38,8 +38,15 @@ class Settings(BaseSettings):
     BACKEND_TIMEOUT_SECONDS: float = Field(default=8.0, gt=0, le=60)
     BACKEND_MAX_RETRIES: int = Field(default=2, ge=0, le=5)
     SKU_SCAN_MAX_PRODUCTS: int = Field(default=40, ge=1, le=200)
+    # Backend trên Render free ngủ sau ~15 phút rảnh (đánh thức mất ~1 phút). >0: ping GET /api/categories
+    # định kỳ để giữ Backend thức (vd 600). 0 = tắt. Lưu ý: giữ thức 24/7 tiêu tốn giờ chạy free của Render.
+    BACKEND_KEEPALIVE_SECONDS: int = Field(default=0, ge=0, le=3600)
 
-    # --- Auth: JWT của Backend, xác thực qua GET /api/users/me ---
+    # --- Auth: JWT do Backend phát hành ---
+    # Có BACKEND_JWT_SECRET (= JWT_SECRET của Backend) → verify HS256 tại chỗ (khuyến nghị, không tốn request).
+    # Không có → dự phòng: xác thực qua GET /api/users/me của Backend.
+    BACKEND_JWT_SECRET: SecretStr | None = None
+    BACKEND_JWT_LEEWAY_SECONDS: int = Field(default=0, ge=0, le=300)  # dung sai lệch đồng hồ khi kiểm tra exp
     IDENTITY_CACHE_SECONDS: int = Field(default=60, ge=0, le=900)
 
     # --- Agent ---

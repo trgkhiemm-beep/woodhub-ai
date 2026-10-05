@@ -20,7 +20,7 @@
 ## 2. Luồng xử lý
 
 ```text
-Frontend / Backend proxy ── contract agent-api v1 ──► app/api (auth JWT qua Backend /api/users/me, rate limit)
+Frontend / Backend proxy ── contract agent-api v1 ──► app/api (verify JWT Backend HS256 tại chỗ, rate limit)
                                                             │
 app/agent/orchestrator ── mỗi lượt ─────────────────────────┘
   1. NLU  (app/nlu/engine)

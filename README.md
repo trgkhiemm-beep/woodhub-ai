@@ -52,5 +52,6 @@ do code trích xuất; lệnh thay đổi dữ liệu và xác nhận không bao
 
 ## Deploy
 - `Dockerfile` hoặc `pip install -r requirements.txt`; start `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
-- Env bắt buộc: `APP_ENV=production`, `BACKEND_BASE_URL`, `CORS_ORIGINS`. Tùy chọn LLM: `AWS_*`, `BEDROCK_MODEL_ID`.
+- Env bắt buộc: `APP_ENV=production`, `BACKEND_BASE_URL`, `CORS_ORIGINS`, `BACKEND_JWT_SECRET` (= `JWT_SECRET` của Backend,
+  để verify JWT tại chỗ). Tùy chọn LLM: `AWS_*`, `BEDROCK_MODEL_ID`.
 - Không cần `SUPABASE_*` ở runtime. Chạy **1 instance** (state xác nhận/session in-memory).

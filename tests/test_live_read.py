@@ -176,7 +176,7 @@ def test_invalid_token_rejected_by_real_backend(http):
 
 def test_guest_cannot_use_management_agent(http):
     res = http.post("/v1/agent/manage/chat", json={"message": "Đổi giá KTV01 thành 1000đ"})
-    assert res.status_code == 403
+    assert res.status_code == 401 and res.json()["code"] == "UNAUTHENTICATED"  # chưa đăng nhập → 401 (role sai → 403)
 
 
 def test_validation_error_envelope(http):

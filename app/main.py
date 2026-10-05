@@ -7,6 +7,7 @@ Entry point WoodHub AI Agent.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
@@ -31,6 +32,15 @@ def _error(status: int, code: str, message: str, request: Request) -> JSONRespon
     return JSONResponse(status_code=status, content={"status": "error", "code": code, "message": message, "request_id": rid})
 
 
+async def _keep_backend_awake(container: Container, every: int) -> None:
+    while True:
+        await asyncio.sleep(every)
+        try:
+            await container.backend.request("GET", "/api/categories")
+        except Exception as exc:  # chỉ là ping; lỗi không được làm sập server
+            logger.warning("Backend keep-alive thất bại: %s", type(exc).__name__)
+
+
 def create_app(settings: Settings | None = None, container: Container | None = None) -> FastAPI:
     settings = settings or get_settings()
     logging.basicConfig(level=settings.LOG_LEVEL)
@@ -39,8 +49,15 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     async def lifespan(app: FastAPI):
         logger.info("WoodHub AI Agent start | env=%s nlu=%s llm=%s backend=%s", settings.APP_ENV.value,
                     settings.NLU_MODE.value, settings.llm_enabled, settings.BACKEND_BASE_URL)
+        container: Container = app.state.container
+        # Đánh thức Backend + nạp từ vựng ngay khi khởi động (chạy nền, không chặn server)
+        tasks = [asyncio.create_task(container.agent.warm_up())]
+        if settings.BACKEND_KEEPALIVE_SECONDS:
+            tasks.append(asyncio.create_task(_keep_backend_awake(container, settings.BACKEND_KEEPALIVE_SECONDS)))
         yield
-        await app.state.container.aclose()
+        for t in tasks:
+            t.cancel()
+        await container.aclose()
 
     app = FastAPI(title="WoodHub AI Agent", version=CONTRACT_VERSION, lifespan=lifespan)
     app.state.container = container or build_container(settings)

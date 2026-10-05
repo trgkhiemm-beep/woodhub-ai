@@ -8,6 +8,7 @@ REQUEST → NLU (LLM có kiểm soát + trích xuất deterministic) → với M
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -34,6 +35,8 @@ from app.tools.base import AgentProfile, ToolContext
 from app.tools.registry import ToolRegistry
 
 logger = logging.getLogger("woodhub.agent")
+LEXICON_WAIT_SECONDS = 2.0
+LEXICON_RETRY_SECONDS = 60
 
 
 @dataclass
@@ -58,6 +61,8 @@ class AgentService:
         self.nlu = nlu
         self.planner = Planner()
         self._lexicon_loaded = False
+        self._lexicon_task: asyncio.Task | None = None
+        self._lexicon_retry_at = 0.0
 
     # ------------------------------------------------------------------ public
     async def handle_turn(self, *, message: str, principal: Principal, profile: AgentProfile, request_id: str,
@@ -218,17 +223,32 @@ class AgentService:
                        role=ctx.principal.role.value, status="denied", tool=tool, error=decision.reason)
         return ToolResult(tool=tool, status=ToolStatus.DENIED, message=decision.reason, error_code="FORBIDDEN")
 
+    async def warm_up(self) -> None:
+        """Gọi khi khởi động: đánh thức Backend (Render ngủ khi rảnh) và nạp từ vựng, không chặn request."""
+        await self._fetch_lexicon()
+
     async def _load_lexicon(self, principal: Principal) -> None:
-        """Nạp tên danh mục/chất liệu THẬT vào từ vựng NLU (một lần; lỗi thì dùng từ vựng mặc định)."""
-        if self._lexicon_loaded:
+        """Nạp tên danh mục/chất liệu THẬT vào từ vựng NLU (một lần). Không bao giờ chặn lượt chat quá
+        LEXICON_WAIT_SECONDS: Backend chậm/ngủ → dùng từ vựng mặc định, việc nạp tiếp tục chạy nền;
+        lỗi → chờ LEXICON_RETRY_SECONDS mới thử lại (không để mọi lượt đều chịu timeout)."""
+        if self._lexicon_loaded or time.monotonic() < self._lexicon_retry_at:
             return
+        if self._lexicon_task is None or self._lexicon_task.done():
+            self._lexicon_task = asyncio.create_task(self._fetch_lexicon())
         try:
-            cats = await self.ports.catalog.list_categories(principal)
-            mats = await self.ports.catalog.list_materials(principal)
+            await asyncio.wait_for(asyncio.shield(self._lexicon_task), LEXICON_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.info("Từ vựng catalog chưa sẵn sàng (Backend chậm) → dùng từ vựng mặc định cho lượt này")
+
+    async def _fetch_lexicon(self) -> None:
+        try:
+            cats = await self.ports.catalog.list_categories(Principal.guest())
+            mats = await self.ports.catalog.list_materials(Principal.guest())
             self.nlu.lexicon.extend_from_catalog([c.name for c in cats], [m.name for m in mats])
             self._lexicon_loaded = True
         except errors.PortError as exc:
-            logger.warning("Không nạp được từ vựng catalog: %s", exc.code)
+            self._lexicon_retry_at = time.monotonic() + LEXICON_RETRY_SECONDS
+            logger.warning("Không nạp được từ vựng catalog: %s (thử lại sau %ds)", exc.code, LEXICON_RETRY_SECONDS)
 
     # ------------------------------------------------------------------ confirmation
     async def _confirm_from_chat(self, ctx: ToolContext, code: str | None) -> AgentResponse:

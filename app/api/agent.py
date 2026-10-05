@@ -15,20 +15,15 @@ from fastapi.responses import StreamingResponse
 
 from app.agent.actions import ActionError
 from app.agent.composer import action_view
-from app.api.deps import current_principal, get_container, rate_limited_principal, request_id
+from app.api.deps import current_principal, get_container, management_principal, rate_limited_manager, rate_limited_principal, request_id
 from app.api.schemas import ActionOut, AgentResponse, ChatRequest, ConfirmRequest, ErrorResponse
 from app.container import Container
-from app.domain.principal import Principal, Role
+from app.domain.principal import Principal
 from app.tools.base import AgentProfile
 
 router = APIRouter(prefix="/v1/agent", tags=["agent"])
 ERRORS = {401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}, 422: {"model": ErrorResponse},
           429: {"model": ErrorResponse}, 503: {"model": ErrorResponse}}
-
-
-def _require_management(principal: Principal) -> None:
-    if principal.role not in (Role.ADMIN, Role.SUPPLIER):
-        raise HTTPException(status_code=403, detail={"code": "FORBIDDEN", "message": "Chỉ quản trị viên hoặc nhà cung cấp được dùng trợ lý quản trị."})
 
 
 async def _turn(req: ChatRequest, principal: Principal, profile: AgentProfile, rid: str, c: Container) -> AgentResponse:
@@ -76,21 +71,19 @@ async def customer_chat_stream(req: ChatRequest, principal: Principal = Depends(
 
 
 @router.post("/manage/chat", response_model=AgentResponse, responses=ERRORS)
-async def manage_chat(req: ChatRequest, principal: Principal = Depends(rate_limited_principal),
+async def manage_chat(req: ChatRequest, principal: Principal = Depends(rate_limited_manager),
                       rid: str = Depends(request_id), c: Container = Depends(get_container)) -> AgentResponse:
-    _require_management(principal)
     return await _turn(req, principal, AgentProfile.MANAGEMENT, rid, c)
 
 
 @router.post("/manage/chat/stream", responses=ERRORS)
-async def manage_chat_stream(req: ChatRequest, principal: Principal = Depends(rate_limited_principal),
+async def manage_chat_stream(req: ChatRequest, principal: Principal = Depends(rate_limited_manager),
                              rid: str = Depends(request_id), c: Container = Depends(get_container)) -> StreamingResponse:
-    _require_management(principal)
     return _stream(await _turn(req, principal, AgentProfile.MANAGEMENT, rid, c))
 
 
 @router.get("/actions/{action_id}", response_model=ActionOut, responses=ERRORS)
-async def get_action(action_id: str, principal: Principal = Depends(current_principal),
+async def get_action(action_id: str, principal: Principal = Depends(management_principal),
                      c: Container = Depends(get_container)) -> ActionOut:
     try:
         action = c.agent.get_action(action_id=action_id, principal=principal)
@@ -100,15 +93,14 @@ async def get_action(action_id: str, principal: Principal = Depends(current_prin
 
 
 @router.post("/actions/{action_id}/confirm", response_model=AgentResponse, responses=ERRORS)
-async def confirm_action(action_id: str, body: ConfirmRequest, principal: Principal = Depends(rate_limited_principal),
+async def confirm_action(action_id: str, body: ConfirmRequest, principal: Principal = Depends(rate_limited_manager),
                          rid: str = Depends(request_id), c: Container = Depends(get_container)) -> AgentResponse:
-    _require_management(principal)
     return await c.agent.confirm_action(action_id=action_id, code=body.confirmation_code, principal=principal,
                                         profile=AgentProfile.MANAGEMENT, request_id=rid, session_id=body.session_id)
 
 
 @router.post("/actions/{action_id}/cancel", response_model=AgentResponse, responses=ERRORS)
-async def cancel_action(action_id: str, principal: Principal = Depends(current_principal),
+async def cancel_action(action_id: str, principal: Principal = Depends(management_principal),
                         rid: str = Depends(request_id), c: Container = Depends(get_container)) -> AgentResponse:
     return c.agent.cancel_action(action_id=action_id, principal=principal, profile=AgentProfile.MANAGEMENT, request_id=rid)
 

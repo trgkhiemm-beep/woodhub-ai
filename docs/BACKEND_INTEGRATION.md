@@ -16,7 +16,7 @@ Adapter: `app/adapters/backend/` · Allowlist: `app/adapters/backend/client.py::
 
 | Port method | Backend endpoint (thật) | Auth gửi đi | Retry | Kiểm chứng |
 |---|---|---|---|---|
-| `IdentityPort.resolve` | `GET /api/users/me` | Bearer token người dùng | GET ×2 | live: token giả → 401 |
+| `IdentityPort.resolve` | **verify JWT HS256 tại chỗ** bằng `BACKEND_JWT_SECRET` (`app/adapters/backend/jwt_identity.py`); dự phòng `GET /api/users/me` khi chưa có secret | Bearer token người dùng | — | `tests/test_jwt_auth.py` |
 | `CatalogPort.search_products` | `GET /api/products?keyword&categoryId&materialId&minPrice&maxPrice&room&style&available&page&size` | token nếu có | GET ×2 | live + đối chiếu Supabase |
 | `CatalogPort.get_product` | `GET /api/products/{id}` | token nếu có | GET ×2 | live + Supabase |
 | `CatalogPort.find_product_by_sku` | keyword search + quét ≤ `SKU_SCAN_MAX_PRODUCTS` chi tiết | | | live (GAP B.2) |
@@ -35,7 +35,9 @@ Khi Backend làm xong một GAP ở Phần B: chỉ sửa method tương ứng t
 
 ### Việc team Backend cần làm (ưu tiên)
 1. **B-2** — chuyển luồng `/api/ai-chat/sessions/{id}/messages` sang gọi `POST {AI}/v1/agent/chat` (hoặc `/v1/agent/manage/chat` cho admin/supplier), **forward header `Authorization`** của người dùng, đọc `message` + `blocks` (map `recommendation.items`/`product_detail` → `suggestedProducts`). `/chat` cũ vẫn chạy trong giai đoạn chuyển tiếp.
-2. **B-1** — xác nhận `GET /api/users/me` là cách verify token được chấp nhận (hoặc cung cấp public key/JWKS để bỏ 1 request/lượt).
+2. **B-1** — đã chọn shared secret: cấu hình `BACKEND_JWT_SECRET` của AI service = `JWT_SECRET` của Backend. Cần Backend xác nhận:
+   token ký **HS256** (jjwt `signWith(key)` không chỉ định thuật toán sẽ tự chọn HS384/HS512 nếu secret ≥ 48/64 byte),
+   claim `sub` = email, claim `role` ∈ admin/supplier/customer, có `exp`.
 3. **B-3** — trả **401** cho token thiếu/hết hạn (hiện 403) và đánh dấu endpoint công khai trong OpenAPI.
 4. GAP B.1 (platform info), B.6 (promotion), B.7 (policy/FAQ/knowledge search), B.3 (tồn kho công khai), B.9 (audit API), B.2 (tra SKU); bổ sung SKU cho 26/27 biến thể đang `NULL`.
 5. Cấp tài khoản **test/staging** (supplier + admin) để chạy kiểm thử ghi thật; hiện luồng ghi mới được kiểm chứng tới bước gửi request.
