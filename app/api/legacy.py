@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_container, rate_limited_principal, request_id
+from app.api.deps import get_container, rate_limited_caller, request_id
 from app.api.schemas import AgentResponse
 from app.container import Container
 from app.domain.principal import Principal
@@ -66,7 +66,7 @@ async def _legacy_stream(resp: AgentResponse) -> AsyncIterator[str]:
 
 
 @router.post("/chat", deprecated=True)
-async def legacy_chat(req: LegacyChatRequest, principal: Principal = Depends(rate_limited_principal),
+async def legacy_chat(req: LegacyChatRequest, principal: Principal = Depends(rate_limited_caller),
                       rid: str = Depends(request_id), c: Container = Depends(get_container)) -> StreamingResponse:
     if req.image_url:
         async def only_message() -> AsyncIterator[str]:

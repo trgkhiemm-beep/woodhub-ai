@@ -10,7 +10,7 @@ import re
 
 from app.nlp.vietnamese import is_gibberish
 from app.nlu.lexicon import fold
-from app.nlu.mutations import GREETINGS
+from app.nlu.patterns import GREETINGS
 from app.nlu.schema import Entities, Intent
 
 _ASK_RECOMMEND = r"\b(tu van|goi y|recommend|suggest|nen mua|nen chon|phu hop|co mau nao|mau nao|loai nao|cai nao|muon mua|can mua|can tim|muon tim|minh can|toi can|em can|can (1|mot|mot cai|cai)|need|looking for|advise)\b"
@@ -22,6 +22,9 @@ _PROMO = r"\b(khuyen mai|giam gia|voucher|ma giam|coupon|uu dai|sale|campaign|ch
 _GUIDE = r"\b(huong dan|cach|lam sao|lam the nao|tai khoan|dang ky|dang nhap|mat khau|theo doi don|dat lam|tinh nang|faq|how to|thiet ke 3d|mau 3d)\b"
 _BRANCH = r"\b(chi nhanh|showroom|cua hang (o dau|nao|gan)|co cua hang|branch|store location|dia diem)\b"
 _WORKSHOP = r"\b(xuong|workshop|tho moc|gia cong)\b"
+_ORDER = (r"\b(don hang|don cua (toi|minh|em)|don dat|ma don|order)\b.*\b(den dau|toi dau|o dau|trang thai|giao chua|"
+          r"chua giao|da giao|bao gio|tinh trang|status|sao roi|the nao|dang)\b|\b(kiem tra|tra cuu|xem|theo doi) (don|don hang|order)\b"
+          r"|\border status\b|\b(don|don hang) (cua )?(toi|minh|em)\b")
 _CART = r"\b(gio hang|them vao gio|xem gio|cart|thanh toan don)\b"
 _SPLIT = re.compile(r"\s+(?:va|voi lai|them nua|con nua|and also|and|also)\s+|[;?]|"
                     r",\s+(?=(?:con|va|gia|chinh sach|co|giao hang|doi tra|bao hanh|thanh toan|hotline|gio mo cua|ship)\b)")
@@ -56,7 +59,7 @@ _DOMAIN = (r"\b(shop|cua hang|woodhub|san pham|sp|noi that|do go|go|gia|bao nhie
            r"website|web|app|ung dung|tai khoan|dang ky|dang nhap|mat khau|3d|thiet ke|xuong|showroom|chi nhanh|"
            r"hotline|lien he|dia chi|mo cua|dong cua|gio|ton kho|con hang|het hang|tu van|goi y|mau|kich thuoc|chat lieu|"
            r"mau sac|faq|huong dan|chinh sach|danh muc|phong|lap dat|catalog|product|price|order|delivery|furniture|"
-           r"discount|store|buy|stock|promotion|warranty|return|shipping|deal)s?\b")
+           r"discount|store|buy|stock|promotion|warranty|return|shipping|deal|nha cung cap|ncc|supplier|seller)s?\b")
 
 
 def out_of_scope(folded: str, e: Entities | None = None) -> bool:
@@ -71,7 +74,7 @@ def out_of_scope(folded: str, e: Entities | None = None) -> bool:
 def in_domain(folded: str, e: Entities) -> bool:
     """Có tín hiệu thuộc phạm vi cửa hàng hay không (entity nội thất / mã / tiền / tham chiếu / từ khóa miền)."""
     if e.product_codes or e.category or e.material or e.room or e.style or e.policy_type or e.store_fields \
-            or e.task_id or e.promo_code or e.taxonomy_kind or e.seats or e.amounts or e.relative or e.size \
+            or e.task_id or e.supplier_name or e.supplier_ref or e.taxonomy_kind or e.seats or e.amounts or e.relative or e.size \
             or e.price_pref or e.ordinal or e.reference:
         return True
     return re.search(_DOMAIN, folded) is not None
@@ -119,8 +122,15 @@ def classify_conf(folded: str, e: Entities, *, has_context: bool = False) -> tup
         return Intent.COMPARE, True
     if re.search(_ASK_STOCK, t) and (refers or has_context or e.category):
         return Intent.INVENTORY, True
-    if e.store_fields and not e.product_codes:
-        return Intent.STORE_INFO, True
+    if re.search(_ORDER, t) and not e.product_codes and not re.search(r"\b(huong dan|lam sao|lam the nao|cach)\b", t):
+        return Intent.ORDER_STATUS, True
+    # Liên hệ / khu vực của NHÀ CUNG CẤP (theo tên, mã sản phẩm hoặc ngữ cảnh). Hỏi chính sách → nhánh POLICY bên dưới.
+    asks_product = re.search(_ASK_PRICE, t) or re.search(_ASK_STOCK, t) or e.category
+    names_supplier = re.search(r"\b(nha cung cap|ncc|supplier|seller|ben ban|ai ban|shop ban|nguoi ban)\b", t)
+    if (e.store_fields or e.supplier_ref or (e.supplier_name and re.search(r"\b(o dau|lien he|thong tin|la ai|ban gi)\b", t))
+            or (names_supplier and e.product_codes)) \
+            and not asks_product and not e.policy_type and (not e.product_codes or names_supplier or e.store_fields):
+        return Intent.SUPPLIER_INFO, True
     if re.search(_BRANCH, t) or (e.city and re.search(r"\b(cua hang|shop|store|chi nhanh|showroom)\b", t)):
         return Intent.BRANCHES, True
     if e.policy_type and not e.product_codes:

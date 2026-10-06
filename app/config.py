@@ -42,12 +42,9 @@ class Settings(BaseSettings):
     # định kỳ để giữ Backend thức (vd 600). 0 = tắt. Lưu ý: giữ thức 24/7 tiêu tốn giờ chạy free của Render.
     BACKEND_KEEPALIVE_SECONDS: int = Field(default=0, ge=0, le=3600)
 
-    # --- Auth: JWT do Backend phát hành ---
-    # Có BACKEND_JWT_SECRET (= JWT_SECRET của Backend) → verify HS256 tại chỗ (khuyến nghị, không tốn request).
-    # Không có → dự phòng: xác thực qua GET /api/users/me của Backend.
-    BACKEND_JWT_SECRET: SecretStr | None = None
-    BACKEND_JWT_LEEWAY_SECONDS: int = Field(default=0, ge=0, le=300)  # dung sai lệch đồng hồ khi kiểm tra exp
-    IDENTITY_CACHE_SECONDS: int = Field(default=60, ge=0, le=900)
+    # --- Bảo vệ server-to-server (Backend → Agent). KHÔNG phải xác thực người dùng (việc của Backend). ---
+    # Đặt giá trị bí mật dài, ngẫu nhiên → mọi request /v1/agent/* phải có header X-Agent-Api-Key khớp. Trống = tắt.
+    AGENT_SERVICE_API_KEY: SecretStr | None = None
 
     # --- Agent ---
     NLU_MODE: NLUMode = NLUMode.AUTO
@@ -55,18 +52,8 @@ class Settings(BaseSettings):
     MAX_TOOL_CALLS_PER_TURN: int = Field(default=6, ge=1, le=20)
     SESSION_TTL_SECONDS: int = Field(default=1800, ge=60)
     MAX_SESSIONS: int = Field(default=10000, ge=10)
-    RATE_LIMIT_PER_MINUTE: int = Field(default=30, ge=1)
-
-    # --- Confirmation ---
-    ACTION_TTL_SECONDS: int = Field(default=600, ge=30, le=3600)
-    STRONG_ACTION_TTL_SECONDS: int = Field(default=300, ge=30, le=3600)
-    MAX_PENDING_ACTIONS_PER_USER: int = Field(default=5, ge=1, le=50)
-
-    # --- Business guard rails (có thể chỉnh theo nghiệp vụ) ---
-    MAX_PROMOTION_PERCENT: float = Field(default=50.0, gt=0, le=100)
-    MAX_PROMOTION_SCOPE_CATEGORIES: int = Field(default=5, ge=1)
-    PRICE_CHANGE_STRONG_RATIO: float = Field(default=0.3, gt=0)
-    MAX_INVENTORY_DELTA: int = Field(default=1000, ge=1)
+    # Chống lạm dụng dịch vụ theo IP client; sau Backend mọi request có thể cùng IP → ngưỡng cao (quota người dùng do Backend).
+    RATE_LIMIT_PER_MINUTE: int = Field(default=600, ge=1)
 
     # --- Audit ---
     AUDIT_LOG_PATH: str = "var/audit/audit.jsonl"

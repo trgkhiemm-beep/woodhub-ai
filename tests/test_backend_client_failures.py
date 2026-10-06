@@ -5,11 +5,11 @@ timeout, 5xx, JSON hỏng, 403/404/409/429, endpoint ngoài allowlist, không re
 import httpx
 import pytest
 
-from app.adapters.backend.adapters import BackendCatalogAdapter, BackendIdentityAdapter
+from app.adapters.backend.adapters import BackendCatalogAdapter, BackendInventoryAdapter
 from app.adapters.backend.client import BackendClient
 from app.domain import errors
 from app.domain.models import SearchCriteria
-from app.domain.principal import Principal, Role
+from app.domain.principal import Principal
 
 GUEST = Principal.guest()
 PID = "c391aff3-5459-4ef7-852a-113f7a90baba"
@@ -36,16 +36,19 @@ def test_5xx_then_success_recovers(loop):
     assert loop.run_until_complete(client_with(lambda r: next(seq)).request("GET", "/api/categories")) == []
 
 
-def test_patch_is_never_retried(loop):
+@pytest.mark.parametrize("method,path", [("PATCH", f"/api/stores/{PID}/inventory/{PID}"), ("PUT", f"/api/variants/{PID}"),
+                                         ("PUT", f"/api/products/{PID}"), ("POST", "/api/categories"),
+                                         ("DELETE", f"/api/products/{PID}")])
+def test_writes_are_blocked_before_any_request(loop, method, path):
     calls = []
 
     def handler(req):
         calls.append(req.method)
-        return httpx.Response(502)
+        return httpx.Response(200, json={})
 
-    with pytest.raises(errors.UpstreamUnavailable):
-        loop.run_until_complete(client_with(handler).request("PATCH", f"/api/stores/{PID}/inventory/{PID}", json={"delta": 1}))
-    assert calls == ["PATCH"]
+    with pytest.raises(errors.Forbidden):
+        loop.run_until_complete(client_with(handler).request(method, path, json={"x": 1}))
+    assert calls == []  # agent chỉ đọc: không request ghi nào rời khỏi AI service
 
 
 @pytest.mark.parametrize("status,exc", [(400, errors.ValidationFailed), (401, errors.Unauthenticated), (403, errors.Forbidden),
@@ -78,18 +81,22 @@ def test_endpoint_allowlist_blocks_arbitrary_calls(loop):
             loop.run_until_complete(c.request(method, path))
 
 
-def test_user_token_forwarded_and_identity_mapped(loop):
+def test_forwarded_token_is_passed_through_untouched(loop):
+    # Agent không giải mã/kiểm tra token: chuyển tiếp NGUYÊN TRẠNG cho Backend, Backend quyết định quyền
     seen = {}
 
     def handler(req):
         seen["auth"] = req.headers.get("authorization")
-        return httpx.Response(200, json={"id": "u-9", "role": "supplier", "email": "s@x"})
+        return httpx.Response(200, json={"id": PID, "name": "X", "variants": []})
 
-    p = loop.run_until_complete(BackendIdentityAdapter(client_with(handler)).resolve("tok-123"))
-    assert seen["auth"] == "Bearer tok-123" and p.role == Role.SUPPLIER and p.user_id == "u-9"
+    catalog = BackendCatalogAdapter(client_with(handler))
+    loop.run_until_complete(catalog.get_product(PID, Principal(access_token="opaque.not-a-jwt")))
+    assert seen["auth"] == "Bearer opaque.not-a-jwt"
+    loop.run_until_complete(catalog.get_product(PID, GUEST))
+    assert seen["auth"] is None  # không có token → không gửi header
 
 
-def test_invalid_token_becomes_unauthenticated(loop):
-    ident = BackendIdentityAdapter(client_with(lambda r: httpx.Response(403), retries=0))
-    with pytest.raises(errors.Unauthenticated):
-        loop.run_until_complete(ident.resolve("bad"))
+def test_inventory_denied_by_backend_is_unknown_not_guessed(loop):
+    inv = BackendInventoryAdapter(client_with(lambda r: httpx.Response(403), retries=0))
+    with pytest.raises(errors.CapabilityUnavailable):
+        loop.run_until_complete(inv.get_inventory(PID, GUEST))

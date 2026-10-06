@@ -2,9 +2,9 @@
 HTTP client tới WoodHub Backend (Spring Boot).
 
 - Chỉ gọi các endpoint trong ALLOWED_ENDPOINTS (đã kiểm chứng từ OpenAPI snapshot
-  contracts/backend/woodhub-be.openapi.snapshot-2026-09-30.json). Không có đường gọi tùy ý.
-- Forward JWT của người dùng → Backend enforce RBAC/ownership lần 2.
-- Timeout, retry có backoff CHỈ cho request an toàn để lặp lại (GET, PUT). PATCH/POST không retry.
+  contracts/backend/woodhub-be.openapi.snapshot-2026-10-06.json). Không có đường gọi tùy ý.
+- Chuyển tiếp NGUYÊN TRẠNG token mà Backend gửi kèm request (không giải mã) → Backend tự enforce quyền/sở hữu.
+- Chỉ GET (agent chỉ đọc). Timeout, retry có backoff.
 - Chuẩn hóa lỗi HTTP → app.domain.errors.
 """
 from __future__ import annotations
@@ -21,31 +21,25 @@ from app.domain.principal import Principal
 
 logger = logging.getLogger("woodhub.backend")
 
-# (method, path pattern) — mọi call phải khớp 1 dòng ở đây.
+# (method, path pattern) — mọi call phải khớp 1 dòng ở đây. Agent CHỈ ĐỌC: không có PUT/PATCH/POST/DELETE.
 ALLOWED_ENDPOINTS: tuple[tuple[str, str], ...] = (
-    ("GET", r"/api/users/me"),
     ("GET", r"/api/products"),
-    ("GET", r"/api/products/mine"),
     ("GET", r"/api/products/[0-9a-fA-F-]{36}"),
-    ("PUT", r"/api/products/[0-9a-fA-F-]{36}"),
-    ("PUT", r"/api/variants/[0-9a-fA-F-]{36}"),
     ("GET", r"/api/variants/[0-9a-fA-F-]{36}/inventory"),
-    ("PATCH", r"/api/stores/[0-9a-fA-F-]{36}/inventory/[0-9a-fA-F-]{36}"),
     ("GET", r"/api/categories"),
-    ("POST", r"/api/categories"),
-    ("PUT", r"/api/categories/[0-9a-fA-F-]{36}"),
     ("GET", r"/api/materials"),
-    ("POST", r"/api/materials"),
-    ("PUT", r"/api/materials/[0-9a-fA-F-]{36}"),
     ("GET", r"/api/rooms"),
     ("GET", r"/api/styles"),
     ("GET", r"/api/suppliers/public"),
+    ("GET", r"/api/suppliers/[0-9a-fA-F-]{36}/public"),
     ("GET", r"/api/suppliers/[0-9a-fA-F-]{36}/stores"),
     ("GET", r"/api/stores/nearby/workshops"),
     ("GET", r"/api/custom/ai/tasks/[0-9a-fA-F-]{36}"),
+    ("GET", r"/api/custom-orders/my"),
+    ("GET", r"/api/custom-orders/[0-9a-fA-F-]{36}"),
 )
 _ALLOWED = tuple((m, re.compile(p + r"$")) for m, p in ALLOWED_ENDPOINTS)
-_RETRY_SAFE = frozenset({"GET", "PUT"})
+_RETRY_SAFE = frozenset({"GET"})
 
 
 class BackendClient:
@@ -67,12 +61,11 @@ class BackendClient:
             raise errors.Forbidden("Endpoint không nằm trong allowlist của AI service.", detail=f"{method} {path}")
 
     async def request(self, method: str, path: str, principal: Principal | None = None, *,
-                      params: dict[str, Any] | None = None, json: Any = None, request_id: str | None = None,
-                      access_token: str | None = None) -> Any:
+                      params: dict[str, Any] | None = None, json: Any = None, request_id: str | None = None) -> Any:
         method = method.upper()
         self._check_allowed(method, path)
         headers: dict[str, str] = {}
-        token = access_token or (principal.access_token if principal else None)
+        token = principal.access_token if principal else None
         if token:
             headers["Authorization"] = f"Bearer {token}"
         if request_id:

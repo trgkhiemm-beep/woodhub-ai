@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 CONTRACT_VERSION = "1.0"
 
@@ -17,7 +17,14 @@ ResponseType = Literal["answer", "clarification", "confirmation_required", "acti
 BlockKind = Literal[
     "recommendation", "product_detail", "product_comparison", "inventory", "store_info", "branch_list",
     "workshop_list", "promotion_list", "policy", "knowledge", "taxonomy", "design_task", "candidates",
+    "supplier_info", "order_status",
 ]
+
+
+def _accepts(name: str, camel: str) -> dict[str, Any]:
+    """Backend (Spring) gửi camelCase (sessionId, confirmationCode): request nhận CẢ HAI cách đặt tên;
+    response giữ nguyên snake_case. OpenAPI ghi alias ở `x-aliases` (JSON Schema không có khái niệm alias)."""
+    return {"validation_alias": AliasChoices(name, camel), "json_schema_extra": {"x-aliases": [camel]}}
 
 
 class Location(BaseModel):
@@ -26,10 +33,14 @@ class Location(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    """Nhận cả snake_case và camelCase: `session_id`|`sessionId`, `client_message_id`|`clientMessageId`."""
     message: str = Field(min_length=1, max_length=10000, description="Tin nhắn người dùng (giới hạn thực tế theo MAX_MESSAGE_CHARS).")
     session_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_\-:.]+$",
-                                   description="Bỏ trống để server tạo phiên mới.")
-    client_message_id: str | None = Field(default=None, max_length=100, description="Id phía client để chống gửi trùng.")
+                                   description="Bỏ trống để server tạo phiên mới. Alias: `sessionId`.",
+                                   **_accepts("session_id", "sessionId"))
+    client_message_id: str | None = Field(default=None, max_length=100,
+                                          description="Id phía client để chống gửi trùng. Alias: `clientMessageId`.",
+                                          **_accepts("client_message_id", "clientMessageId"))
     location: Location | None = Field(default=None, description="Vị trí thiết bị (chỉ dùng cho tìm xưởng gần).")
 
     @field_validator("message")
@@ -41,8 +52,12 @@ class ChatRequest(BaseModel):
 
 
 class ConfirmRequest(BaseModel):
-    confirmation_code: str = Field(min_length=4, max_length=12)
-    session_id: str | None = Field(default=None, max_length=100)
+    """Giữ cho tương thích Backend (/api/admin/ai-agent/actions/{id}/confirm). Agent CHỈ ĐỌC nên không còn action:
+    luôn trả AgentResponse type=error, error.code=ACTION_NOT_FOUND. Nhận `confirmationCode`, `sessionId`."""
+    confirmation_code: str = Field(min_length=4, max_length=12, description="Alias: `confirmationCode`.",
+                                   **_accepts("confirmation_code", "confirmationCode"))
+    session_id: str | None = Field(default=None, max_length=100, description="Alias: `sessionId`.",
+                                   **_accepts("session_id", "sessionId"))
 
 
 class SourceOut(BaseModel):
@@ -56,8 +71,59 @@ class SourceOut(BaseModel):
 
 
 class Block(BaseModel):
+    """Dữ liệu có cấu trúc kèm câu trả lời. Hình dạng `data` theo `kind` — các kind mới có schema riêng:
+    `supplier_info` → SupplierInfoBlockData, `order_status` → list[OrderStatusBlockData]."""
     kind: BlockKind
     data: Any
+
+
+# ---- Schema tài liệu cho data của block (không dùng để validate response; xuất vào OpenAPI components).
+class SupplierStoreBlockData(BaseModel):
+    id: str
+    name: str | None = None
+    district: str | None = None
+    city: str | None = None
+    kind: str | None = None
+    supplier_id: str | None = None
+
+
+class SupplierInfoBlockData(BaseModel):
+    """Block `supplier_info`: hồ sơ CÔNG KHAI của nhà cung cấp (Backend /api/suppliers/{id}/public + /stores)."""
+    id: str
+    name: str
+    type: str | None = Field(default=None, description="retailer | workshop")
+    description: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    stores: list[SupplierStoreBlockData] = Field(default_factory=list, description="Chỉ quận/thành phố (Backend công khai).")
+    product: str | None = Field(default=None, description="Tên sản phẩm dùng để xác định nhà cung cấp (nếu có).")
+    fields: list[Literal["hotline", "email", "address", "opening_hours"]] = Field(
+        default_factory=list, description="Trường khách hỏi; rỗng = mặc định điện thoại, email, khu vực.")
+    topic: Literal["shipping", "return", "warranty", "payment", "terms", "privacy"] | None = Field(
+        default=None, description="Khách hỏi chính sách của nhà cung cấp; Backend chưa có dữ liệu chính sách.")
+
+
+class OrderStatusChangeBlockData(BaseModel):
+    from_status: str | None = None
+    to_status: str | None = None
+    note: str | None = None
+    created_at: str | None = None
+
+
+class OrderStatusBlockData(BaseModel):
+    """Phần tử của block `order_status` (data là danh sách): đơn đặt làm do Backend trả theo token Backend chuyển tiếp."""
+    id: str
+    order_number: str | None = None
+    status: str = Field(description="Giá trị nguyên văn từ Backend (custom_orders.status).")
+    workshop_name: str | None = None
+    total_amount: float | None = None
+    lead_time_days: int | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    history: list[OrderStatusChangeBlockData] = Field(default_factory=list)
+
+
+BLOCK_DATA_SCHEMAS = (SupplierInfoBlockData, OrderStatusBlockData)
 
 
 class FieldChangeOut(BaseModel):
@@ -103,7 +169,8 @@ class ErrorOut(BaseModel):
 class MetaOut(BaseModel):
     contract_version: str = CONTRACT_VERSION
     profile: Literal["customer", "management"]
-    role: Literal["guest", "customer", "supplier", "admin"]
+    role: Literal["guest", "customer", "supplier", "admin"] = Field(
+        default="customer", description="Luôn 'customer': Agent không xác thực/phân quyền người dùng (Backend làm). Giữ cho tương thích.")
     planner: Literal["rules", "llm"] = Field(description="NLU: 'llm' = LLM phân loại ý + code trích xuất; 'rules' = dự phòng.")
     tools_used: list[str] = Field(default_factory=list)
     intents: list[str] = Field(default_factory=list, description="Các ý người dùng mà agent nhận diện trong lượt này.")

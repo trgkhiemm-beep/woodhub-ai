@@ -10,27 +10,17 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from app.agent.dialogue import DialogueState, ShownProduct
-from app.domain.messages import OUT_OF_SCOPE
-from app.nlu.engine import INTENT_TO_TOOL
-from app.nlu.schema import MUTATION_INTENTS, Entities, Intent, IntentFrame
+from app.domain.messages import NO_INFO, OUT_OF_SCOPE, READ_ONLY
+from app.nlu.schema import Entities, Intent, IntentFrame
 
-NEEDS_MESSAGES = {
-    "value": "Khuyến mãi giảm bao nhiêu (ví dụ 20% hoặc 500k)?",
-    "promotion": "Bạn muốn đổi trạng thái khuyến mãi nào? Vui lòng cho biết mã hoặc id khuyến mãi.",
-    "sku": "Bạn cho mình mã sản phẩm cần thay đổi nhé (ví dụ KTV01).",
-    "price": "Giá mới là bao nhiêu (ví dụ 8 triệu)?",
-    "description": "Nội dung mô tả mới là gì? Ví dụ: \"Cập nhật mô tả KTV01: …\"",
-    "hotline": "Số hotline mới là gì?",
-    "email": "Email mới là gì?",
-    "opening_hours": "Giờ mở cửa mới là mấy giờ đến mấy giờ (ví dụ 8h-21h)?",
-    "address": "Địa chỉ mới là gì?",
-    "faq": "Hãy gửi theo mẫu: Thêm FAQ: hỏi: <câu hỏi> | trả lời: <câu trả lời>",
-    "details": "Bạn muốn thay đổi thông tin gì, cho đối tượng nào và giá trị mới là bao nhiêu?",
-}
+POLICY_LABELS = {"shipping": "giao hàng", "return": "đổi trả", "warranty": "bảo hành", "payment": "thanh toán",
+                 "terms": "điều khoản", "privacy": "bảo mật"}
 REPLIES = {
-    Intent.GREETING: "Chào bạn! Bạn cần tìm sản phẩm, xem giá hay thông tin cửa hàng?",
+    Intent.GREETING: "Chào bạn! Bạn cần tìm sản phẩm, xem giá hay thông tin nhà cung cấp?",
     Intent.OUT_OF_SCOPE: OUT_OF_SCOPE,
     Intent.CART: "Trợ lý chưa hỗ trợ giỏ hàng. Bạn dùng giỏ hàng trên website nhé.",
+    Intent.CHANGE_REQUEST: READ_ONLY,
+    Intent.PROMOTION: NO_INFO,   # Backend/Supabase chưa có dữ liệu khuyến mãi; giá do nhà cung cấp tự quản lý
 }
 CLARIFY_GENERIC = "Bạn cần tìm sản phẩm nào (tên, mã hoặc loại nội thất)?"
 CATEGORY_QUESTION = "Bạn cần loại nội thất nào (bàn, ghế, tủ, giường, kệ…) và ngân sách khoảng bao nhiêu?"
@@ -68,6 +58,22 @@ def _product_ref(e: Entities, state: DialogueState) -> tuple[dict[str, Any] | No
     return None, None
 
 
+def _supplier_ref(e: Entities, state: DialogueState) -> dict[str, Any]:
+    """Nhà cung cấp đang được nói tới: tên nêu rõ > mã sản phẩm > sản phẩm trong ngữ cảnh. Rỗng → tool hỏi lại."""
+    if e.supplier_name:
+        return {"supplier_name": e.supplier_name}
+    if e.product_codes:
+        return {"sku": e.product_codes[0]}
+    if e.ordinal and state.by_ordinal(e.ordinal):
+        return {"product_id": state.by_ordinal(e.ordinal).id}
+    cur = state.current()
+    return {"product_id": cur.id} if cur else {}
+
+
+def _diversity(e: Entities) -> dict[str, Any]:
+    return {"distinct_suppliers": True} if e.distinct_suppliers else {}
+
+
 def _recommend_args(c: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in c.items() if v not in (None, "", [])}
 
@@ -78,11 +84,6 @@ class Planner:
 
         if i in REPLIES:
             return Step("reply", message=REPLIES[i])
-        if i in MUTATION_INTENTS:
-            args = frame.tool_args or {"_needs": "details"}
-            if "_needs" in args:
-                return Step("clarify", tool=INTENT_TO_TOOL[i], message=NEEDS_MESSAGES.get(args["_needs"], NEEDS_MESSAGES["details"]))
-            return Step("tool", tool=INTENT_TO_TOOL[i], args=args)
 
         # Trả lời cho câu hỏi làm rõ đang chờ (vd trợ lý hỏi ngân sách, người dùng đáp "10 triệu")
         answering = state.pending == "recommend" or (bool(state.constraints) and not e.category and not e.relative)
@@ -91,14 +92,23 @@ class Planner:
                 and (e.amounts or e.seats or e.size or e.category or e.material or e.color or e.room):
             return self._recommend(e, state, continuation=True)
 
-        if i == Intent.STORE_INFO:
-            return Step("tool", tool="get_store_info", args={"fields": e.store_fields} if e.store_fields else {})
+        if i == Intent.SUPPLIER_INFO:
+            return Step("tool", tool="get_supplier_info", args={**_supplier_ref(e, state), **(
+                {"fields": [f for f in e.store_fields if f in ("hotline", "email", "address", "opening_hours")]}
+                if e.store_fields else {})})
         if i == Intent.BRANCHES:
             return Step("tool", tool="list_branches", args={"city": e.city} if e.city else {})
         if i == Intent.POLICY:
-            if e.policy_type:
-                return Step("tool", tool="get_policy", args={"policy_type": e.policy_type})
-            return Step("tool", tool="search_knowledge", args={"query": e.question or "chính sách", "kinds": ["policy"]})
+            # Chính sách giao hàng/đổi trả/bảo hành thuộc từng NHÀ CUNG CẤP; Backend chưa có dữ liệu chính sách.
+            ref = _supplier_ref(e, state)
+            topic = e.policy_type if e.policy_type in POLICY_LABELS else None
+            if ref:
+                return Step("tool", tool="get_supplier_info", args={**ref, **({"topic": topic} if topic else {})})
+            label = f" {POLICY_LABELS[topic]}" if topic else ""
+            return Step("reply", message=f"Hiện chưa có thông tin đã xác minh về chính sách{label}. "
+                                         "Chính sách do từng nhà cung cấp quy định — bạn đang hỏi về sản phẩm hoặc nhà cung cấp nào?")
+        if i == Intent.ORDER_STATUS:
+            return Step("tool", tool="get_order_status", args={"order_id": e.task_id} if e.task_id else {})
         if i == Intent.GUIDE_FAQ:
             return Step("tool", tool="search_knowledge", args={"query": (e.question or "")[:300] or "hướng dẫn", "kinds": ["faq", "guide"]})
         if i == Intent.TAXONOMY:
@@ -109,10 +119,6 @@ class Planner:
             if not e.task_id:
                 return Step("clarify", message="Bạn cho mình mã task 3D (dạng xxxxxxxx-xxxx-…) nhé.")
             return Step("tool", tool="get_design_task_status", args={"task_id": e.task_id})
-        if i == Intent.PROMOTION:
-            if e.promo_code:
-                return Step("tool", tool="get_promotions", args={"code": e.promo_code})
-            return Step("tool", tool="get_promotions", args={"category": e.category} if e.category else {})
 
         if i in (Intent.PRODUCT_DETAIL, Intent.INVENTORY):
             ref, question = _product_ref(e, state)
@@ -153,7 +159,8 @@ class Planner:
                 return Step("tool", tool="get_product", args={"name": e.product_name})
             return Step("clarify", message=CATEGORY_QUESTION)
         state.constraints = state.merge_constraints(c)
-        return Step("tool", tool="recommend_products", args={**_recommend_args(state.constraints), "mode": "search", "limit": 5})
+        return Step("tool", tool="recommend_products", args={**_recommend_args(state.constraints), "mode": "search", "limit": 5,
+                                                             **_diversity(e)})
 
     def _recommend(self, e: Entities, state: DialogueState, continuation: bool = False) -> Step:
         new = {k: getattr(e, k) for k in ("category", "material", "color", "style", "room", "use_case",
@@ -191,7 +198,7 @@ class Planner:
             return Step("clarify", message=f"Ngân sách khoảng bao nhiêu và {extra} thế nào?")
         state.pending = None
         state.constraints = constraints
-        return Step("tool", tool="recommend_products", args={**_recommend_args(constraints), "mode": "recommend"})
+        return Step("tool", tool="recommend_products", args={**_recommend_args(constraints), "mode": "recommend", **_diversity(e)})
 
     @staticmethod
     def relative_step(relative: str, ref: ShownProduct, constraints: dict[str, Any], state: DialogueState) -> Step:

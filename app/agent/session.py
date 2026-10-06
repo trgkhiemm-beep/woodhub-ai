@@ -1,8 +1,8 @@
 """
 Session store in-memory có TTL và giới hạn kích thước (thay cho dict `session_memory` tăng vô hạn cũ).
 
-Mỗi session gắn với chủ sở hữu (user_id hoặc guest). Session_id của người khác không bị dùng lại:
-server tạo session mới thay vì trả ngữ cảnh của người khác.
+Agent không biết danh tính người dùng (Backend giữ việc đó): session_id do server tạo ngẫu nhiên (không đoán được) và
+Backend lưu theo từng người dùng/phiên chat của mình. session_id lạ/hết hạn → tạo phiên mới.
 Lịch sử hội thoại đầy đủ do Backend lưu (/api/ai-chat/...); ở đây chỉ giữ ngữ cảnh tối thiểu.
 """
 from __future__ import annotations
@@ -19,7 +19,6 @@ from app.agent.dialogue import DialogueState
 @dataclass
 class Session:
     id: str
-    owner: str
     conversation: DialogueState = field(default_factory=DialogueState)
     expires_at: float = 0.0
 
@@ -30,21 +29,14 @@ class SessionStore:
         self._max = max_sessions
         self._items: OrderedDict[str, Session] = OrderedDict()
 
-    @staticmethod
-    def _owner(principal: Principal) -> str:
-        return principal.user_id if principal.is_authenticated and principal.user_id else "guest"
-
-    def get_or_create(self, session_id: str | None, principal: Principal) -> Session:
+    def get_or_create(self, session_id: str | None, principal: Principal | None = None) -> Session:
         now = time.monotonic()
-        owner = self._owner(principal)
         s = self._items.get(session_id) if session_id else None
-        if s is not None and (s.expires_at < now or s.owner != owner):
+        if s is not None and s.expires_at < now:
             s = None
-            if session_id and self._items.get(session_id) and self._items[session_id].owner != owner:
-                session_id = None  # không chiếm dụng session của người khác
         if s is None:
             sid = session_id or f"s_{secrets.token_urlsafe(12)}"
-            s = Session(id=sid, owner=owner)
+            s = Session(id=sid)
             self._items[sid] = s
         s.expires_at = now + self._ttl
         self._items.move_to_end(s.id)

@@ -2,7 +2,7 @@
 Product Advisor: nhu cầu → catalog THẬT → ràng buộc CỨNG → xếp hạng.
 
 - Không nới ngân sách, không gợi ý sản phẩm "gần đúng": sai loại/chất liệu/màu/ngân sách hoặc không xác minh
-  được (thiếu giá; thiếu kích thước/số chỗ khi tiêu chí cần) → loại. Không còn sản phẩm → NOT_FOUND (NO_PRODUCT).
+  được (thiếu giá; thiếu kích thước/số chỗ khi tiêu chí cần) → loại. Không còn sản phẩm → NOT_FOUND (NO_INFO).
 - Tiết kiệm truy vấn: 1 lần đọc danh sách (danh mục được cache); chỉ đọc chi tiết khi tiêu chí cần dữ liệu biến thể.
 - LLM không tham gia chọn sản phẩm.
 """
@@ -16,9 +16,8 @@ from typing import Literal
 from pydantic import Field
 
 from app.domain import errors
-from app.domain.messages import NO_PRODUCT
+from app.domain.messages import NO_INFO
 from app.domain.models import Freshness, Product, ProductSummary, SearchCriteria
-from app.domain.principal import Role
 from app.domain.results import ToolResult, ToolStatus
 from app.nlu.lexicon import fold
 from app.tools.base import OperationType, ToolContext, ToolInput, ToolSpec
@@ -50,6 +49,7 @@ class RecommendInput(ToolInput):
     max_area_cm2: float | None = Field(default=None, gt=0)
     min_area_cm2: float | None = Field(default=None, gt=0)
     exclude_ids: list[str] = Field(default_factory=list, max_length=20)
+    distinct_suppliers: bool = False   # "từ các nhà cung cấp khác nhau" → mỗi nhà cung cấp tối đa 1 mẫu
     limit: int = Field(default=3, ge=1, le=5)
     mode: Literal["recommend", "search"] = "recommend"
 
@@ -244,18 +244,23 @@ async def recommend_products(args: RecommendInput, ctx: ToolContext) -> ToolResu
                               (c.dims.area or 1e9) if (args.size == "compact" or args.max_area_cm2) else 0,
                               -(c.dims.area or 0) if (args.size == "large" or args.min_area_cm2) else 0,
                               abs((budget_ref * 0.85) - (c.price or 0)) if budget_ref else (c.price or 0)))
+    if args.distinct_suppliers:
+        seen: set[str] = set()
+        cands = [c for c in cands if not (c.summary.supplier_name in seen or seen.add(c.summary.supplier_name or c.summary.id))]
     top = cands[: args.limit]
     data = {
-        "mode": args.mode, "requirements": args.model_dump(exclude_none=True, exclude={"limit", "mode", "exclude_ids"}),
+        "mode": args.mode, "distinct_suppliers": args.distinct_suppliers,
+        "requirements": args.model_dump(exclude_none=True, exclude={"limit", "mode", "exclude_ids", "distinct_suppliers"}),
         "matched": len(cands),
         "unverifiable": ["phong cách (dữ liệu sản phẩm chưa gắn phong cách)"] if args.style else [],
         "items": [{"id": c.summary.id, "name": c.summary.name, "price": c.price, "category": c.summary.category,
+                   "supplier": c.summary.supplier_name,
                    "material": c.summary.material, "dimensions": c.dims_text, "area_cm2": c.dims.area,
                    "seats": c.seats, "seats_estimated": c.seats_estimated, "colors": c.colors,
                    "image_url": c.summary.image_url, "reasons": c.reasons} for c in top],
     }
     return ToolResult(tool="recommend_products", status=ToolStatus.OK if top else ToolStatus.NOT_FOUND, data=data,
-                      message=None if top else NO_PRODUCT,
+                      message=None if top else NO_INFO,
                       sources=[ctx.source("products", Freshness.REALTIME, system=catalog.source_system,
                                           record_id=c.summary.id) for c in top])
 
@@ -264,6 +269,6 @@ ADVISOR_TOOLS = [
     ToolSpec("recommend_products",
              "Tư vấn/tìm sản phẩm theo nhu cầu: loại, ngân sách (VND), số người, kích thước, chất liệu, màu, phòng, phong cách. "
              "Lọc chặt trên catalog thật.",
-             RecommendInput, OperationType.SEARCH, frozenset(Role), "low", "Backend /api/products + /api/products/{id}",
+             RecommendInput, OperationType.SEARCH, "low", "Backend /api/products + /api/products/{id}",
              read_handler=recommend_products),
 ]

@@ -76,13 +76,17 @@ class Lexicon:
     colors: dict[str, str] = field(default_factory=lambda: dict(COLOR_TERMS))
     rooms: dict[str, str] = field(default_factory=lambda: dict(ROOM_TERMS))
     styles: dict[str, str] = field(default_factory=lambda: dict(STYLE_TERMS))
+    suppliers: dict[str, str] = field(default_factory=dict)  # tên nhà cung cấp THẬT (nạp từ Backend)
 
-    def extend_from_catalog(self, categories: list[str], materials: list[str]) -> None:
-        """Thêm tên danh mục/chất liệu THẬT từ Backend (vd 'Gỗ công nghiệp Melamine')."""
+    def extend_from_catalog(self, categories: list[str], materials: list[str], suppliers: list[str] = ()) -> None:
+        """Thêm tên danh mục/chất liệu/nhà cung cấp THẬT từ Backend (vd 'Gỗ công nghiệp Melamine')."""
         for name in categories:
             self.categories.setdefault(fold(name), name.lower())
         for name in materials:
             self.materials.setdefault(fold(name), name)
+        for name in suppliers:
+            if len(fold(name)) >= 3:
+                self.suppliers.setdefault(fold(name), name)
 
     @staticmethod
     def _longest(text: str, table: dict[str, str], exclude: set[tuple[int, int]] | None = None) -> tuple[str, tuple[int, int]] | None:

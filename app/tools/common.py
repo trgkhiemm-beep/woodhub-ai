@@ -7,7 +7,7 @@ import re
 from pydantic import Field, model_validator
 
 from app.domain import errors
-from app.domain.messages import NO_PRODUCT, PRODUCT_API_ERROR, PRODUCT_TOOLS, SYSTEM_ERROR
+from app.domain.messages import BACKEND_DENIED, NO_INFO, PRODUCT_API_ERROR, PRODUCT_TOOLS, SYSTEM_ERROR
 from app.domain.models import Product, SearchCriteria, Variant
 from app.domain.results import ToolResult, ToolStatus
 from app.nlp.vietnamese import restore_diacritics_for_search
@@ -23,12 +23,13 @@ def error_result(tool: str, exc: errors.PortError) -> ToolResult:
     logger.warning("tool=%s port_error=%s detail=%s", tool, exc.code, (exc.detail or "")[:300])
     product = tool in PRODUCT_TOOLS
     if isinstance(exc, errors.NotFound):
-        return ToolResult(tool=tool, status=ToolStatus.NOT_FOUND, message=NO_PRODUCT if product else exc.message,
+        return ToolResult(tool=tool, status=ToolStatus.NOT_FOUND, message=NO_INFO if product else exc.message,
                           error_code=exc.code)
     if isinstance(exc, errors.CapabilityUnavailable):
         return ToolResult(tool=tool, status=ToolStatus.UNKNOWN, message=exc.message, error_code=exc.code)
     if isinstance(exc, (errors.Forbidden, errors.Unauthenticated)):
-        return ToolResult(tool=tool, status=ToolStatus.DENIED, message=exc.message, error_code=exc.code)
+        # Backend từ chối (token hết hạn/không đủ quyền): câu dễ hiểu cho khách, chi tiết chỉ nằm trong log
+        return ToolResult(tool=tool, status=ToolStatus.DENIED, message=BACKEND_DENIED, error_code=exc.code)
     if isinstance(exc, (errors.ValidationFailed, errors.Conflict)):
         return ToolResult(tool=tool, status=ToolStatus.INVALID, message=exc.message, error_code=exc.code)
     return ToolResult(tool=tool, status=ToolStatus.ERROR, message=PRODUCT_API_ERROR if product else SYSTEM_ERROR,
@@ -83,7 +84,7 @@ async def resolve_product(tool: str, ref: ProductRef, ctx: ToolContext) -> Produ
             page = await catalog.search_products(
                 SearchCriteria(keyword=restore_diacritics_for_search(ref.name), size=5), ctx.principal)
             if not page.items:
-                return ToolResult(tool=tool, status=ToolStatus.NOT_FOUND, message=NO_PRODUCT)
+                return ToolResult(tool=tool, status=ToolStatus.NOT_FOUND, message=NO_INFO)
             if len(page.items) > 1:
                 return ToolResult(tool=tool, status=ToolStatus.NEEDS_INPUT,
                                   message="Có nhiều sản phẩm phù hợp, bạn muốn hỏi sản phẩm nào?",

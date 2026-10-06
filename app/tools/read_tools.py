@@ -1,21 +1,17 @@
-"""Tools READ / SEARCH / REALTIME — không thay đổi dữ liệu."""
+"""Tools READ / SEARCH / REALTIME — agent CHỈ ĐỌC dữ liệu thật qua Backend."""
 from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.domain import errors
-from app.domain.models import Freshness, KnowledgeKind, NamedRef, PolicyType, PromotionStatus
-from app.domain.principal import Role
+from app.domain.messages import NO_INFO
+from app.domain.models import Freshness, KnowledgeKind, NamedRef, SupplierInfo
 from app.domain.results import ToolResult, ToolStatus
 from app.nlp.vietnamese import remove_vietnamese_diacritics
 from app.tools.base import OperationType, ToolContext, ToolInput, ToolSpec
-from app.tools.common import ProductRef, error_result, pick_variant, remember_product, resolve_product
-
-ALL_ROLES = frozenset(Role)
-AUTHENTICATED = frozenset({Role.CUSTOMER, Role.SUPPLIER, Role.ADMIN})
-
+from app.tools.common import SKU_PATTERN, ProductRef, error_result, pick_variant, remember_product, resolve_product
 
 def _norm(text: str | None) -> str:
     return remove_vietnamese_diacritics((text or "").lower()).strip()
@@ -30,22 +26,59 @@ def match_named(items: list[NamedRef], name: str) -> NamedRef | None:
     return partial[0] if partial else None
 
 
-# ---------------- Store ----------------
-class StoreInfoInput(ToolInput):
-    fields: list[Literal["hotline", "email", "address", "opening_hours", "social_links"]] | None = None
+# ---------------- Supplier (nhà cung cấp) ----------------
+class SupplierInfoInput(ToolInput):
+    """Đúng MỘT nguồn xác định nhà cung cấp: id, tên, hoặc sản phẩm (id/mã) mà khách đang hỏi."""
+    supplier_id: str | None = Field(default=None, max_length=64)
+    supplier_name: str | None = Field(default=None, min_length=2, max_length=120)
+    product_id: str | None = Field(default=None, max_length=64)
+    sku: str | None = Field(default=None, pattern=SKU_PATTERN)
+    fields: list[Literal["hotline", "email", "address", "opening_hours"]] | None = None
+    topic: Literal["shipping", "return", "warranty", "payment", "terms", "privacy"] | None = None  # hỏi chính sách của NCC
+
+    @model_validator(mode="after")
+    def _one_source(self) -> "SupplierInfoInput":
+        if sum(x is not None for x in (self.supplier_id, self.supplier_name, self.product_id, self.sku)) > 1:
+            raise ValueError("Chỉ cung cấp một trong supplier_id, supplier_name, product_id hoặc sku.")
+        return self
 
 
-async def get_store_info(args: StoreInfoInput, ctx: ToolContext) -> ToolResult:
+def _match_supplier(items: list[SupplierInfo], name: str) -> SupplierInfo | None:
+    key = _norm(name)
+    exact = [s for s in items if _norm(s.name) == key]
+    partial = sorted((s for s in items if key and key in _norm(s.name)), key=lambda s: len(s.name))
+    return (exact or partial or [None])[0]
+
+
+async def get_supplier_info(args: SupplierInfoInput, ctx: ToolContext) -> ToolResult:
+    """Thông tin liên hệ của NHÀ CUNG CẤP (không dùng một 'thông tin cửa hàng chung' của WoodHub)."""
+    store = ctx.ports.store
+    product_name = None
     try:
-        info = await ctx.ports.store.get_store_info(ctx.principal)
+        supplier_id = args.supplier_id
+        if args.product_id or args.sku:
+            product = await resolve_product("get_supplier_info", ProductRef(product_id=args.product_id, sku=args.sku), ctx)
+            if isinstance(product, ToolResult):
+                return product
+            if not product.supplier_id:
+                return ToolResult(tool="get_supplier_info", status=ToolStatus.NOT_FOUND, message=NO_INFO)
+            supplier_id, product_name = product.supplier_id, product.name
+        elif args.supplier_name:
+            found = _match_supplier(await store.list_suppliers(ctx.principal), args.supplier_name)
+            if found is None:
+                return ToolResult(tool="get_supplier_info", status=ToolStatus.NOT_FOUND, message=NO_INFO)
+            supplier_id = found.id
+        if not supplier_id:
+            names = [s.name for s in await store.list_suppliers(ctx.principal)]
+            return ToolResult(tool="get_supplier_info", status=ToolStatus.NEEDS_INPUT,
+                              message="Bạn muốn hỏi thông tin của nhà cung cấp nào?",
+                              data={"candidates": [{"name": n} for n in names[:10]]})
+        info = await store.get_supplier(supplier_id, ctx.principal)
     except errors.PortError as exc:
-        return error_result("get_store_info", exc)
-    data = info.model_dump(mode="json")
-    if args.fields:
-        data = {k: v for k, v in data.items() if k in set(args.fields) | {"name", "version", "updated_at"}}
-    return ToolResult(tool="get_store_info", status=ToolStatus.OK, data=data,
-                      sources=[ctx.source("store_info", Freshness.REFERENCE, system=ctx.ports.store.source_system,
-                                          version=info.version)])
+        return error_result("get_supplier_info", exc)
+    data = {**info.model_dump(), "product": product_name, "fields": args.fields or [], "topic": args.topic}
+    return ToolResult(tool="get_supplier_info", status=ToolStatus.OK, data=data,
+                      sources=[ctx.source("suppliers", Freshness.REFERENCE, system=store.source_system, record_id=info.id)])
 
 
 class BranchInput(ToolInput):
@@ -59,7 +92,7 @@ async def list_branches(args: BranchInput, ctx: ToolContext) -> ToolResult:
         return error_result("list_branches", exc)
     status = ToolStatus.OK if items else ToolStatus.NOT_FOUND
     return ToolResult(tool="list_branches", status=status, data=[b.model_dump() for b in items],
-                      message=None if items else "Chưa có thông tin chi nhánh phù hợp.",
+                      message=None if items else NO_INFO,
                       sources=[ctx.source("branches", Freshness.REFERENCE, system=ctx.ports.store.source_system)])
 
 
@@ -77,8 +110,26 @@ async def find_nearby_workshops(args: WorkshopInput, ctx: ToolContext) -> ToolRe
     except errors.PortError as exc:
         return error_result("find_nearby_workshops", exc)
     return ToolResult(tool="find_nearby_workshops", status=ToolStatus.OK if items else ToolStatus.NOT_FOUND,
-                      data=[b.model_dump() for b in items],
+                      data=[b.model_dump() for b in items], message=None if items else NO_INFO,
                       sources=[ctx.source("workshops_nearby", Freshness.REFERENCE, system=ctx.ports.store.source_system)])
+
+
+# ---------------- Orders (đơn của chính khách) ----------------
+class OrderStatusInput(ToolInput):
+    order_id: str | None = Field(default=None, pattern=r"^[0-9a-fA-F-]{36}$")
+
+
+async def get_order_status(args: OrderStatusInput, ctx: ToolContext) -> ToolResult:
+    try:
+        orders = ([await ctx.ports.orders.get_order(args.order_id, ctx.principal)] if args.order_id
+                  else await ctx.ports.orders.list_my_orders(ctx.principal, limit=3))
+    except errors.PortError as exc:
+        return error_result("get_order_status", exc)
+    if not orders:
+        return ToolResult(tool="get_order_status", status=ToolStatus.NOT_FOUND, message="Chưa tìm thấy đơn hàng nào của bạn.")
+    return ToolResult(tool="get_order_status", status=ToolStatus.OK, data=[o.model_dump() for o in orders],
+                      sources=[ctx.source("custom_orders", Freshness.REALTIME, system=ctx.ports.orders.source_system,
+                                          record_id=o.id) for o in orders])
 
 
 # ---------------- Catalog ----------------
@@ -116,7 +167,7 @@ async def compare_products(args: CompareInput, ctx: ToolContext) -> ToolResult:
         rows.append({"code": ref.sku, "name": product.name, "material": product.material, "category": product.category,
                      "price": v.price if v else (prices[0] if prices else None),
                      "dimensions": v.dimensions if v else next((x.dimensions for x in product.variants if x.dimensions), None),
-                     "color": v.color if v else None, "product_id": product.id})
+                     "color": v.color if v else None, "product_id": product.id, "supplier": product.supplier_name})
     return ToolResult(tool="compare_products", status=ToolStatus.OK, data={"rows": rows},
                       sources=[ctx.source("products", Freshness.REALTIME, system=ctx.ports.catalog.source_system,
                                           record_id=r["product_id"]) for r in rows])
@@ -151,48 +202,9 @@ async def get_inventory(args: InventoryInput, ctx: ToolContext) -> ToolResult:
                                           record_id=product.id)] if known else [])
 
 
-class PromotionsInput(ToolInput):
-    category: str | None = Field(default=None, max_length=80)
-    code: str | None = Field(default=None, max_length=40)
-    status: PromotionStatus | None = None
-
-
-async def get_promotions(args: PromotionsInput, ctx: ToolContext) -> ToolResult:
-    try:
-        if args.code:
-            promos = [await ctx.ports.promotions.get_promotion(args.code, ctx.principal)]
-        else:
-            category_id = None
-            if args.category:
-                cat = match_named(await ctx.ports.catalog.list_categories(ctx.principal), args.category)
-                category_id = cat.id if cat else None
-            status = args.status if ctx.principal.role == Role.ADMIN else PromotionStatus.ACTIVE
-            promos = await ctx.ports.promotions.list_promotions(ctx.principal, status=status, category_id=category_id)
-    except errors.PortError as exc:
-        return error_result("get_promotions", exc)
-    return ToolResult(tool="get_promotions", status=ToolStatus.OK if promos else ToolStatus.NOT_FOUND,
-                      data=[p.model_dump(mode="json") for p in promos],
-                      message=None if promos else "Hiện không có khuyến mãi đang áp dụng phù hợp.",
-                      sources=[ctx.source("promotions", Freshness.REALTIME, system=ctx.ports.promotions.source_system)])
-
-
-class PolicyInput(ToolInput):
-    policy_type: PolicyType
-
-
-async def get_policy(args: PolicyInput, ctx: ToolContext) -> ToolResult:
-    try:
-        doc = await ctx.ports.knowledge.get_policy(args.policy_type, ctx.principal)
-    except errors.PortError as exc:
-        return error_result("get_policy", exc)
-    return ToolResult(tool="get_policy", status=ToolStatus.OK, data=doc.model_dump(mode="json"),
-                      sources=[ctx.source("policy", Freshness.SEMANTIC, system=ctx.ports.knowledge.source_system,
-                                          record_id=doc.id, version=doc.version)])
-
-
 class KnowledgeSearchInput(ToolInput):
     query: str = Field(min_length=2, max_length=300)
-    kinds: list[KnowledgeKind] = Field(default_factory=lambda: [KnowledgeKind.FAQ, KnowledgeKind.GUIDE, KnowledgeKind.POLICY])
+    kinds: list[KnowledgeKind] = Field(default_factory=lambda: [KnowledgeKind.FAQ, KnowledgeKind.GUIDE])
     top_k: int = Field(default=3, ge=1, le=5)
 
 
@@ -202,8 +214,7 @@ async def search_knowledge(args: KnowledgeSearchInput, ctx: ToolContext) -> Tool
     except errors.PortError as exc:
         return error_result("search_knowledge", exc)
     return ToolResult(tool="search_knowledge", status=ToolStatus.OK if hits else ToolStatus.NOT_FOUND,
-                      data=[h.model_dump(mode="json") for h in hits],
-                      message=None if hits else "Chưa tìm thấy thông tin đã xác minh cho câu hỏi này.",
+                      data=[h.model_dump(mode="json") for h in hits], message=None if hits else NO_INFO,
                       sources=[ctx.source("knowledge", Freshness.SEMANTIC, system=ctx.ports.knowledge.source_system,
                                           record_id=h.document_id, version=h.version) for h in hits])
 
@@ -238,32 +249,31 @@ async def get_design_task_status(args: DesignTaskInput, ctx: ToolContext) -> Too
 
 
 READ_TOOLS: list[ToolSpec] = [
-    ToolSpec("get_store_info", "Thông tin cửa hàng WoodHub: hotline, email, địa chỉ, giờ mở cửa.", StoreInfoInput,
-             OperationType.READ, ALL_ROLES, "low", "Backend (GAP B.1)", read_handler=get_store_info),
-    ToolSpec("list_branches", "Danh sách chi nhánh/cửa hàng, lọc theo thành phố.", BranchInput,
-             OperationType.READ, ALL_ROLES, "low", "Backend /api/suppliers/public + /stores", read_handler=list_branches),
-    ToolSpec("find_nearby_workshops", "Tìm xưởng gia công gần vị trí khách (vị trí lấy từ thiết bị, cần đăng nhập).",
-             WorkshopInput, OperationType.READ, AUTHENTICATED, "low", "Backend /api/stores/nearby/workshops",
-             read_handler=find_nearby_workshops, requires_auth=True),
-    ToolSpec("get_product", "Chi tiết một sản phẩm (giá theo biến thể, kích thước, màu, chất liệu, ảnh) theo SKU, id hoặc tên.",
-             GetProductInput, OperationType.REALTIME, ALL_ROLES, "low", "Backend /api/products/{id}",
+    ToolSpec("get_supplier_info", "Liên hệ/khu vực của NHÀ CUNG CẤP theo sản phẩm, tên hoặc id (không có giờ mở cửa).",
+             SupplierInfoInput, OperationType.READ, "low", "Backend /api/suppliers/{id}/public + /stores",
+             read_handler=get_supplier_info),
+    ToolSpec("list_branches", "Cửa hàng của các nhà cung cấp bán lẻ, lọc theo thành phố.", BranchInput,
+             OperationType.READ, "low", "Backend /api/suppliers/public + /stores", read_handler=list_branches),
+    ToolSpec("find_nearby_workshops", "Tìm xưởng gia công gần vị trí khách (vị trí lấy từ thiết bị).",
+             WorkshopInput, OperationType.READ, "low", "Backend /api/stores/nearby/workshops",
+             read_handler=find_nearby_workshops),
+    ToolSpec("get_product", "Chi tiết một sản phẩm (giá theo biến thể, kích thước, màu, chất liệu, nhà cung cấp) theo SKU, id hoặc tên.",
+             GetProductInput, OperationType.REALTIME, "low", "Backend /api/products/{id}",
              read_handler=get_product),
-    ToolSpec("compare_products", "So sánh 2-3 sản phẩm (mã hoặc id).", CompareInput, OperationType.READ, ALL_ROLES, "low",
-             "Backend /api/products/{id}", read_handler=compare_products),
-    ToolSpec("get_inventory", "Tồn kho realtime của sản phẩm/biến thể.", InventoryInput, OperationType.REALTIME,
-             ALL_ROLES, "low", "Backend /api/variants/{id}/inventory (supplier) · GAP B.3 (công khai)",
+    ToolSpec("compare_products", "So sánh 2-3 sản phẩm (mã hoặc id), kể cả khác nhà cung cấp.", CompareInput,
+             OperationType.READ, "low", "Backend /api/products/{id}", read_handler=compare_products),
+    ToolSpec("get_inventory", "Tình trạng còn/hết hàng realtime của sản phẩm/biến thể.", InventoryInput,
+             OperationType.REALTIME, "low", "Backend /api/variants/{id}/inventory (supplier) · chưa có API công khai",
              read_handler=get_inventory),
-    ToolSpec("get_promotions", "Khuyến mãi/voucher đang áp dụng, theo danh mục hoặc mã.", PromotionsInput,
-             OperationType.REALTIME, ALL_ROLES, "low", "Backend (GAP B.6)", read_handler=get_promotions),
-    ToolSpec("get_policy", "Chính sách chính thức: shipping, return, warranty, payment, terms, privacy.", PolicyInput,
-             OperationType.READ, ALL_ROLES, "low", "Backend (GAP B.7)", read_handler=get_policy),
-    ToolSpec("search_knowledge", "Tìm FAQ, hướng dẫn sử dụng website/app, chính sách theo nội dung câu hỏi.",
-             KnowledgeSearchInput, OperationType.SEARCH, ALL_ROLES, "low", "Backend knowledge search (GAP B.7)",
-             read_handler=search_knowledge),
+    ToolSpec("get_order_status", "Trạng thái đơn đặt làm của khách (Backend quyết định quyền xem).", OrderStatusInput,
+             OperationType.REALTIME, "low", "Backend /api/custom-orders/my|{id}",
+             read_handler=get_order_status),
+    ToolSpec("search_knowledge", "FAQ / hướng dẫn sử dụng website, app WoodHub.", KnowledgeSearchInput,
+             OperationType.SEARCH, "low", "Backend knowledge (chưa có nguồn)", read_handler=search_knowledge),
     ToolSpec("list_taxonomy", "Liệt kê danh mục, chất liệu, loại phòng hoặc phong cách.", TaxonomyInput,
-             OperationType.READ, ALL_ROLES, "low", "Backend /api/categories|materials|rooms|styles",
+             OperationType.READ, "low", "Backend /api/categories|materials|rooms|styles",
              read_handler=list_taxonomy),
     ToolSpec("get_design_task_status", "Trạng thái task tạo mẫu 3D của chính người dùng.", DesignTaskInput,
-             OperationType.REALTIME, AUTHENTICATED, "low", "Backend /api/custom/ai/tasks/{id}",
-             read_handler=get_design_task_status, requires_auth=True),
+             OperationType.REALTIME, "low", "Backend /api/custom/ai/tasks/{id}",
+             read_handler=get_design_task_status),
 ]

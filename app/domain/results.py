@@ -16,7 +16,6 @@ class ToolStatus(str, Enum):
     DENIED = "denied"                      # không đủ quyền
     INVALID = "invalid"                    # input không hợp lệ
     NEEDS_INPUT = "needs_input"            # thiếu thông tin, cần hỏi lại
-    CONFIRMATION_REQUIRED = "confirmation_required"
     ERROR = "error"                        # lỗi hạ tầng (timeout, backend down, dữ liệu hỏng)
 
 
@@ -27,7 +26,6 @@ class ToolResult(BaseModel):
     sources: list[SourceRef] = Field(default_factory=list)
     message: str | None = None             # thông điệp an toàn cho người dùng (tiếng Việt)
     error_code: str | None = None
-    action_id: str | None = None           # khi CONFIRMATION_REQUIRED
 
     @property
     def ok(self) -> bool:

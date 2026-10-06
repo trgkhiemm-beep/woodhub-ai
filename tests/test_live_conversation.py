@@ -7,8 +7,7 @@ import re
 import pytest
 
 from app.agent.composer import vnd
-from app.domain.messages import NO_PRODUCT
-from app.domain.principal import Role
+from app.domain.messages import NO_INFO
 from app.nlu.lexicon import fold
 from app.tools.advisor import ROOM_AFFINITY, parse_dimensions
 from app.tools.base import AgentProfile
@@ -20,7 +19,7 @@ pytestmark = pytest.mark.usefixtures("live")
 class Chat:
     def __init__(self, loop, agent, who=None):
         self.loop, self.agent, self.sid = loop, agent, None
-        self.who = who or principal(Role.GUEST)
+        self.who = who or principal()
 
     def __call__(self, msg):
         r = self.loop.run_until_complete(self.agent.handle_turn(message=msg, principal=self.who, profile=AgentProfile.CUSTOMER,
@@ -66,7 +65,7 @@ def test_smaller_uses_reference_dimensions(chat, catalog):
     ref_area = parse_dimensions(ref["product_variants"][0]["dimensions"]).area
     items = rec_items(r) if r.blocks else []
     if not items:
-        assert r.message == NO_PRODUCT
+        assert r.message == NO_INFO
     for it in items:
         assert it["area_cm2"] < ref_area and it["id"] != ref["id"]
         assert f"- {it['name']} — " in r.message
@@ -121,11 +120,13 @@ def test_unknown_category_asks_first(chat):
     assert chat("tư vấn giúp mình với").type == "clarification"
 
 
-def test_session_context_not_shared_between_users(loop, audit_sink):
+def test_unknown_session_id_starts_empty_session(loop, audit_sink):
+    # Agent không biết danh tính người dùng; phiên do server tạo ngẫu nhiên, Backend giữ ánh xạ phiên ↔ người dùng.
     container, _ = build_live(audit_sink)
-    a = Chat(loop, container.agent, principal(Role.CUSTOMER, "user-a"))
+    a = Chat(loop, container.agent)
     a("tìm kệ tivi")
-    b = Chat(loop, container.agent, principal(Role.CUSTOMER, "user-b"))
-    b.sid = a.sid  # cố dùng lại session của người khác
+    assert a.sid.startswith("s_") and len(a.sid) >= 16  # không đoán được
+    b = Chat(loop, container.agent)
+    b.sid = "s_unknown-session"
     r = b("mẫu 1 giá bao nhiêu")
-    assert r.type == "clarification" and r.session_id != a.sid
+    assert r.type == "clarification"  # phiên lạ không có ngữ cảnh của ai

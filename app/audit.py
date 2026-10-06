@@ -59,7 +59,7 @@ class AuditLogger:
     def __init__(self, sinks: list[AuditSink]):
         self._sinks = sinks
 
-    def log(self, event: str, *, request_id: str, user_id: str, role: str, status: str, action: str | None = None,
+    def log(self, event: str, *, request_id: str, user_id: str, status: str, role: str | None = None, action: str | None = None,
             action_id: str | None = None, tool: str | None = None, target: dict[str, Any] | None = None,
             before: Any = None, after: Any = None, confirmation: str | None = None, error: str | None = None,
             extra: dict[str, Any] | None = None) -> dict[str, Any]:

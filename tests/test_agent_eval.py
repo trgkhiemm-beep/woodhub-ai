@@ -27,5 +27,4 @@ def test_agent_evaluation_thresholds(loop, suite):
         if r[key] is not None:
             assert r[key] >= 0.9, (key, r[key], failed)
     assert r["task_completion_rate"] >= 0.9, failed
-    assert intercept.writes == [] or all(w[0] in ("update_variant_price", "update_product_description", "upsert_category")
-                                         for w in intercept.writes)
+    assert intercept.writes == []  # agent chỉ đọc: không một request ghi nào

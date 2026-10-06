@@ -118,24 +118,7 @@ class InventoryInfo(BaseModel):
     by_store: list[StoreStock] = Field(default_factory=list)
 
 
-# ---------------- Store / branches ----------------
-class OpeningHours(BaseModel):
-    days: list[str]
-    open: str
-    close: str
-
-
-class StoreInfo(BaseModel):
-    name: str
-    hotline: str | None = None
-    email: str | None = None
-    address: str | None = None
-    opening_hours: list[OpeningHours] = Field(default_factory=list)
-    social_links: dict[str, str] = Field(default_factory=dict)
-    version: int | None = None
-    updated_at: str | None = None
-
-
+# ---------------- Suppliers / stores ----------------
 class Branch(BaseModel):
     id: str
     name: str | None = None
@@ -145,64 +128,44 @@ class Branch(BaseModel):
     phone: str | None = None
     distance_km: float | None = None
     kind: Literal["showroom", "retailer", "workshop"] | None = None
+    supplier_id: str | None = None
 
 
-# ---------------- Promotions ----------------
-class PromotionStatus(str, Enum):
-    DRAFT = "draft"
-    SCHEDULED = "scheduled"
-    ACTIVE = "active"
-    PAUSED = "paused"
-    ENDED = "ended"
-
-
-class PromotionScope(BaseModel):
-    all_products: bool = False
-    category_ids: list[str] = Field(default_factory=list)
-    product_ids: list[str] = Field(default_factory=list)
-
-
-class Promotion(BaseModel):
+class SupplierInfo(BaseModel):
+    """Hồ sơ CÔNG KHAI của nhà cung cấp (Backend /api/suppliers/{id}/public + /stores). Không có giờ mở cửa."""
     id: str
     name: str
-    type: Literal["percentage", "fixed_amount", "free_shipping"]
-    value: float
-    max_discount: float | None = None
-    code: str | None = None
-    scope: PromotionScope = Field(default_factory=PromotionScope)
-    starts_at: datetime
-    ends_at: datetime
-    min_order_value: float | None = None
-    status: PromotionStatus
-    version: int | None = None
+    type: str | None = None
+    description: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    stores: list[Branch] = Field(default_factory=list)   # Backend công khai: quận/thành phố
 
 
-# ---------------- Knowledge ----------------
+# ---------------- Orders (đơn đặt làm của chính khách) ----------------
+class OrderStatusChange(BaseModel):
+    from_status: str | None = None
+    to_status: str | None = None
+    note: str | None = None
+    created_at: str | None = None
+
+
+class CustomOrder(BaseModel):
+    id: str
+    order_number: str | None = None
+    status: str
+    workshop_name: str | None = None
+    total_amount: float | None = None
+    lead_time_days: int | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    history: list[OrderStatusChange] = Field(default_factory=list)
+
+
+# ---------------- Knowledge (FAQ/hướng dẫn Web/App) ----------------
 class KnowledgeKind(str, Enum):
-    POLICY = "policy"
     FAQ = "faq"
     GUIDE = "guide"
-    OPERATIONS = "operations"
-
-
-class PolicyType(str, Enum):
-    SHIPPING = "shipping"
-    RETURN = "return"
-    WARRANTY = "warranty"
-    PAYMENT = "payment"
-    TERMS = "terms"
-    PRIVACY = "privacy"
-
-
-class KnowledgeDocument(BaseModel):
-    id: str
-    kind: KnowledgeKind
-    title: str
-    content: str
-    policy_type: PolicyType | None = None
-    tags: list[str] = Field(default_factory=list)
-    version: int | None = None
-    updated_at: str | None = None
 
 
 class KnowledgeHit(BaseModel):

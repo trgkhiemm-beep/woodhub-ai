@@ -1,37 +1,30 @@
-"""Định nghĩa tool: typed input, loại thao tác, quyền, mức rủi ro, mức xác nhận."""
+"""Định nghĩa tool: typed input, loại thao tác (CHỈ ĐỌC), quyền, mức rủi ro."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Awaitable, Callable, Literal, Protocol
+from typing import Any, Awaitable, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from app.config import Settings
-from app.domain.actions import ConfirmationLevel, FieldChange, PendingAction
 from app.domain.models import Freshness, SourceRef
-from app.domain.principal import Principal, Role
+from app.domain.principal import Principal
 from app.domain.results import ToolResult
 from app.ports import Ports
 
 
 class OperationType(str, Enum):
+    """Agent chỉ đọc dữ liệu: không có loại thao tác ghi (INSERT/UPDATE/DELETE thuộc Backend Admin API)."""
     READ = "READ"
     SEARCH = "SEARCH"
     REALTIME = "REALTIME"
-    UPDATE = "UPDATE"
-    SENSITIVE_UPDATE = "SENSITIVE_UPDATE"
-    ACTION = "ACTION"
-
-    @property
-    def is_mutation(self) -> bool:
-        return self in (OperationType.UPDATE, OperationType.SENSITIVE_UPDATE, OperationType.ACTION)
 
 
 class AgentProfile(str, Enum):
-    CUSTOMER = "customer"      # khách/guest: chỉ READ/SEARCH/REALTIME
-    MANAGEMENT = "management"  # admin + supplier: thêm mutation theo quyền
+    CUSTOMER = "customer"      # khách/guest
+    MANAGEMENT = "management"  # admin + supplier qua /v1/agent/manage/chat (giữ tương thích Backend) — cũng CHỈ ĐỌC
 
 
 class ToolInput(BaseModel):
@@ -63,27 +56,6 @@ class ToolContext:
                          record_id=record_id, version=None if version is None else str(version))
 
 
-@dataclass
-class Proposal:
-    """Kế hoạch mutation đã chuẩn bị (đọc trạng thái hiện tại), chờ xác nhận."""
-    target_type: str
-    target_id: str
-    target_label: str
-    summary: str
-    changes: list[FieldChange]
-    params: dict[str, Any]
-    snapshot: dict[str, Any] = field(default_factory=dict)
-    warnings: list[str] = field(default_factory=list)
-    escalate_to_strong: bool = False
-
-
-class MutationHandler(Protocol):
-    async def prepare(self, args: Any, ctx: ToolContext) -> Proposal | ToolResult: ...
-    async def check_fresh(self, action: PendingAction, ctx: ToolContext) -> None: ...
-    async def execute(self, action: PendingAction, ctx: ToolContext) -> dict[str, Any]: ...
-    async def verify(self, action: PendingAction, result: dict[str, Any], ctx: ToolContext) -> bool: ...
-
-
 ReadHandler = Callable[[Any, ToolContext], Awaitable[ToolResult]]
 
 
@@ -93,24 +65,13 @@ class ToolSpec:
     description: str
     input_model: type[ToolInput]
     operation: OperationType
-    allowed_roles: frozenset[Role]
     risk: Literal["low", "medium", "high"]
     source_of_truth: str
-    read_handler: ReadHandler | None = None
-    mutation: MutationHandler | None = None
-    confirmation: ConfirmationLevel = ConfirmationLevel.NONE
-    requires_auth: bool = False
+    read_handler: ReadHandler
 
     def __post_init__(self) -> None:
-        if self.operation.is_mutation:
-            if self.mutation is None or self.read_handler is not None:
-                raise ValueError(f"{self.name}: mutation tool phải có MutationHandler và không có read_handler")
-            if self.confirmation == ConfirmationLevel.NONE:
-                raise ValueError(f"{self.name}: mutation tool bắt buộc có confirmation")
-            if Role.GUEST in self.allowed_roles or Role.CUSTOMER in self.allowed_roles:
-                raise ValueError(f"{self.name}: guest/customer không được có mutation quản trị")
-        elif self.read_handler is None:
-            raise ValueError(f"{self.name}: read tool thiếu read_handler")
+        if not isinstance(self.operation, OperationType) or self.read_handler is None:
+            raise ValueError(f"{self.name}: tool phải là READ/SEARCH/REALTIME và có read_handler")
 
     def json_schema(self) -> dict[str, Any]:
         return self.input_model.model_json_schema()

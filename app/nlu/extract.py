@@ -16,6 +16,7 @@ _MASKS = [
     r"\btu (ngay|thang|luc|dau|khi|nay|hom|sang|chieu|toi)\b", r"\bke (hoach|toan|ca|chuyen|cho|ve|ra|lai|tu|ten)\b",
     r"\bban (oi|co|la|dang|muon|can|giup|cho (minh|toi|em)|nhe|a)\b", r"\b(cam on|chao|nho|hoi) ban\b", r"^ban\b(?= (oi|co|la)\b)",
     r"\bban hang\b", r"\bban chay\b",
+    r"\b(nha cung cap|ncc|shop|nguoi|ai|ben|cua hang|noi|duoc) ban\b",  # "bán" (sell), không phải "bàn"
 ]
 _CODE_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{2,5})[\s\-_]?(\d{1,4}[A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*)(?![A-Za-z0-9])")
 _NOT_CODE_PREFIX = {"mau", "cai", "so", "thu", "loai", "top", "ban", "ghe", "tu", "ke", "phong", "nguoi", "ng", "cho", "tang",
@@ -252,6 +253,8 @@ def extract(raw: str, lex: Lexicon) -> Entities:
     room = lex.match(masked, "rooms")
     e.room = room[0] if room else None
     style = lex.match(masked, "styles")
+    sup = lex.match(raw_folded, "suppliers")
+    e.supplier_name = sup[0] if sup else None
     e.style = style[0] if style else None
     e.city = next((v for k, v in CITIES.items() if re.search(rf"\b{k}\b", raw_folded)), None)
     e.policy_type = next((p for p, rx in POLICY_TERMS if re.search(rf"\b({rx})", base)), None)
@@ -267,9 +270,14 @@ def extract(raw: str, lex: Lexicon) -> Entities:
     e.store_fields = list(dict.fromkeys(fields))
     if u := UUID_RE.search(raw or ""):
         e.task_id = u.group(0)
-    codes = [c for c in re.findall(r"\b[A-Z][A-Z0-9_-]{2,29}\b", raw or "") if any(ch.isdigit() for ch in c)]
-    if codes and re.search(r"\b(khuyen mai|voucher|ma giam|ma|code|coupon)\b", base):
-        e.promo_code = codes[-1]
+    # nhà cung cấp: "shop này ở đâu", "liên hệ nhà cung cấp", "từ các nhà cung cấp khác nhau"
+    if re.search(r"\b(shop|cua hang|nha cung cap|ncc|nha ban|ben ban|xuong|supplier|seller|nguoi ban)\s*(nay|do|kia|ay|cua (mau|san pham|cai) (nay|do))\b"
+                 r"|\b(ai ban|ben nao ban|cua (shop|nha cung cap) nao|nha cung cap (nao|la ai))\b", base):
+        e.supplier_ref = True
+    if re.search(r"\b(nhieu|cac|khac nhau|moi)\s*(nha cung cap|ncc|shop|cua hang|ben)\b.*\b(khac nhau)?|"
+                 r"\b(nha cung cap|ncc|shop|cua hang) khac nhau\b|\bdifferent (suppliers|sellers|shops)\b", base) \
+            and re.search(r"\bkhac nhau\b|\bdifferent\b|\bmoi (nha cung cap|ncc|shop|ben)\b", base):
+        e.distinct_suppliers = True
     if re.search(r"\b(danh muc|loai san pham|categories)\b", base):
         e.taxonomy_kind = "categories"
     elif re.search(r"\b(chat lieu|vat lieu|materials?)\s+(nao|gi|gom|co nhung|nhung)|\bnhung (chat lieu|vat lieu)\b", base):

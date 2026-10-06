@@ -7,8 +7,7 @@ import re
 
 import pytest
 
-from app.domain.messages import OUT_OF_SCOPE
-from app.domain.principal import Role
+from app.domain.messages import OUT_OF_SCOPE, READ_ONLY
 from app.nlu.llm import LLMUnavailable
 from app.tools.base import AgentProfile
 from tests.conftest import build_live, principal
@@ -34,8 +33,8 @@ def llm_agent(audit_sink, llm):
     return container.agent, intercept
 
 
-def turn(loop, agent, msg, role=Role.GUEST, profile=AgentProfile.CUSTOMER, sid="s-llm"):
-    return loop.run_until_complete(agent.handle_turn(message=msg, principal=principal(role, "u-llm"), profile=profile,
+def turn(loop, agent, msg, profile=AgentProfile.CUSTOMER, sid="s-llm"):
+    return loop.run_until_complete(agent.handle_turn(message=msg, principal=principal(), profile=profile,
                                                      request_id="req-llm-0001", session_id=sid))
 
 
@@ -73,14 +72,21 @@ def test_llm_cannot_inject_entities(loop, audit_sink):
     assert r.type == "clarification" and "OAK-99" not in r.message and not re.search(r"\d\.\d{3}đ", r.message)
 
 
-def test_llm_mutation_intent_never_executes_or_escalates(loop, audit_sink):
-    llm = ScriptedLLM({"intents": [{"intent": "update_price", "span": "chỉnh giá cho tôi đi"}]},
-                      {"intents": [{"intent": "update_price", "span": "chỉnh giá cho tôi đi"}]})
-    agent, intercept = llm_agent(audit_sink, llm)
-    r = turn(loop, agent, "chỉnh giá cho tôi đi", role=Role.CUSTOMER)
-    assert r.action is None and r.type != "confirmation_required" and "không thực hiện thay đổi" in r.message
-    r2 = turn(loop, agent, "chỉnh giá cho tôi đi", role=Role.SUPPLIER, profile=AgentProfile.MANAGEMENT, sid="s2")
-    assert r2.type == "clarification" and r2.action is None and intercept.writes == []
+def test_change_requests_are_refused_without_llm(loop, audit_sink):
+    llm = ScriptedLLM({"intents": [{"intent": "update_price", "span": "chỉnh giá cho tôi đi"}]})
+    agent, transport = llm_agent(audit_sink, llm)
+    for profile, sid in ((AgentProfile.CUSTOMER, "s1"), (AgentProfile.MANAGEMENT, "s2")):
+        r = turn(loop, agent, "chỉnh giá cho tôi đi", profile=profile, sid=sid)
+        assert r.message == READ_ONLY and r.action is None and r.type == "answer" and r.meta.tools_used == []
+    assert llm.calls == [] and transport.writes == []
+
+
+def test_llm_label_change_request_is_read_only(loop, audit_sink):
+    # LLM gán nhãn "update_price" cho câu bộ luật không chắc → vẫn chỉ trả lời "chỉ đọc", không tool nào
+    llm = ScriptedLLM({"intents": [{"intent": "update_price", "span": "làm giúp tôi cái đó đi"}]})
+    agent, transport = llm_agent(audit_sink, llm)
+    r = turn(loop, agent, "làm giúp tôi cái đó đi", profile=AgentProfile.MANAGEMENT)
+    assert r.meta.tools_used == [] and r.action is None and transport.writes == []
 
 
 def test_llm_uses_conversation_context_for_ordinal(loop, audit_sink, truth):
@@ -114,11 +120,13 @@ def test_llm_multi_intent(loop, audit_sink):
     llm = ScriptedLLM({"intents": [{"intent": "product_detail", "span": "giá KTV01"}, {"intent": "policy", "span": "bảo hành bao lâu"}]})
     agent, _ = llm_agent(audit_sink, llm)
     r = turn(loop, agent, "giá KTV01 và bảo hành bao lâu")
-    assert r.meta.tools_used == ["get_product", "get_policy"] and "chưa có thông tin đã xác minh về chính sách" in r.message
+    # chính sách thuộc NHÀ CUNG CẤP của sản phẩm đang hỏi; Backend chưa có dữ liệu chính sách → nói rõ, kèm liên hệ thật
+    assert r.meta.tools_used == ["get_product", "get_supplier_info"]
+    assert "chưa có thông tin đã xác minh về chính sách bảo hành" in r.message
 
 
 def test_confirmation_never_goes_through_llm(loop, audit_sink):
     llm = ScriptedLLM()
     agent, _ = llm_agent(audit_sink, llm)
-    turn(loop, agent, "xác nhận ABC123", role=Role.SUPPLIER, profile=AgentProfile.MANAGEMENT)
+    turn(loop, agent, "xác nhận ABC123", profile=AgentProfile.MANAGEMENT)
     assert llm.calls == []

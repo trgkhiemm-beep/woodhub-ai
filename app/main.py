@@ -15,12 +15,13 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 
 from app.api import agent as agent_api
 from app.api import legacy as legacy_api
 from app.api.deps import RateLimiter
-from app.api.schemas import CONTRACT_VERSION
+from app.api.schemas import BLOCK_DATA_SCHEMAS, CONTRACT_VERSION
 from app.config import Settings, get_settings
 from app.container import Container, build_container
 
@@ -92,7 +93,27 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     def health() -> dict[str, str]:
         return {"status": "ok", "contract_version": CONTRACT_VERSION}
 
+    _document_block_schemas(app)
     return app
+
+
+def _document_block_schemas(app: FastAPI) -> None:
+    """Thêm schema của `Block.data` theo kind (supplier_info, order_status) vào OpenAPI components."""
+    def openapi() -> dict[str, Any]:
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(title=app.title, version=app.version, openapi_version=app.openapi_version,
+                             description=app.description, routes=app.routes)
+        components = schema.setdefault("components", {}).setdefault("schemas", {})
+        for model in BLOCK_DATA_SCHEMAS:
+            js = model.model_json_schema(ref_template="#/components/schemas/{model}")
+            for name, sub in js.pop("$defs", {}).items():
+                components.setdefault(name, sub)
+            components[model.__name__] = js
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = openapi
 
 
 def __getattr__(name: str) -> Any:

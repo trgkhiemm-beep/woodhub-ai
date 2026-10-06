@@ -62,21 +62,24 @@ class BedrockConverseClient:
 
 
 # Prompt ngắn có chủ đích (token đầu vào mỗi lượt): LLM chỉ được gọi khi bộ luật deterministic không chắc chắn.
-INTENT_GUIDE = """greeting | store_info: giờ mở cửa/hotline/địa chỉ | branches: chi nhánh | policy: giao hàng/đổi trả/bảo hành/thanh toán
-guide_faq: hướng dẫn dùng web/app | taxonomy: danh mục/chất liệu | workshop: xưởng gần | design_task: task 3D | promotion
-product_search: tìm sản phẩm | recommend: tư vấn theo nhu cầu, rẻ hơn/nhỏ hơn | product_detail: giá/thông tin 1 sản phẩm
-inventory: còn hàng | compare | update_price, update_description, adjust_inventory, update_store_info, upsert_faq,
-create_promotion, set_promotion_status, upsert_category, upsert_material: yêu cầu SỬA dữ liệu | cart
-out_of_scope: không liên quan cửa hàng nội thất | unclear"""
+# Prompt ngắn có chủ đích (token đầu vào mỗi lượt): LLM chỉ được gọi khi bộ luật deterministic không chắc chắn.
+INTENT_GUIDE = """greeting | supplier_info: liên hệ/địa chỉ nhà cung cấp, "shop này ở đâu" | branches: cửa hàng theo thành phố
+policy: giao hàng/đổi trả/bảo hành | guide_faq: hướng dẫn dùng web/app | taxonomy: danh mục/chất liệu | workshop: xưởng gần
+design_task: task 3D | order_status: đơn hàng của tôi | promotion | product_search: tìm sản phẩm
+recommend: tư vấn theo nhu cầu, rẻ hơn/nhỏ hơn | product_detail: giá/thông tin 1 sản phẩm | inventory: còn hàng | compare
+change_request: yêu cầu SỬA/XÓA/TẠO dữ liệu | cart | out_of_scope: không liên quan WoodHub | unclear"""
 
-SYSTEM_PROMPT = """Phân loại ý định cho trợ lý cửa hàng nội thất. CHỈ trả JSON. Câu có thể không dấu/teencode/tiếng Anh/nhiều ý.
+SYSTEM_PROMPT = """Phân loại ý định cho trợ lý khách hàng của sàn nội thất WoodHub (nhiều nhà cung cấp). CHỈ trả JSON. Câu có thể không dấu/teencode/tiếng Anh/nhiều ý.
 Intent: {guide}
 JSON: {{"intents":[{{"intent":"<intent>","span":"<đoạn nguyên văn>"}}],"language":"vi|en|mixed"}}
 Ví dụ: "giá KTV01 và bảo hành bao lâu" -> {{"intents":[{{"intent":"product_detail","span":"giá KTV01"}},{{"intent":"policy","span":"bảo hành bao lâu"}}],"language":"vi"}}"""
 
 _ALIASES = {"price": Intent.PRODUCT_DETAIL, "product_price": Intent.PRODUCT_DETAIL, "detail": Intent.PRODUCT_DETAIL,
             "search": Intent.PRODUCT_SEARCH, "recommendation": Intent.RECOMMEND, "stock": Intent.INVENTORY,
-            "faq": Intent.GUIDE_FAQ, "guide": Intent.GUIDE_FAQ, "store": Intent.STORE_INFO, "branch": Intent.BRANCHES}
+            "faq": Intent.GUIDE_FAQ, "guide": Intent.GUIDE_FAQ, "store_info": Intent.SUPPLIER_INFO,
+            "store": Intent.SUPPLIER_INFO, "supplier": Intent.SUPPLIER_INFO, "branch": Intent.BRANCHES,
+            "order": Intent.ORDER_STATUS, "update_price": Intent.CHANGE_REQUEST, "update_description": Intent.CHANGE_REQUEST,
+            "adjust_inventory": Intent.CHANGE_REQUEST, "create_promotion": Intent.CHANGE_REQUEST}
 
 
 def parse_llm_output(text: str, message: str) -> tuple[list[tuple[Intent, str]], str]:

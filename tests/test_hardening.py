@@ -13,8 +13,7 @@ import pytest
 
 from app.audit import MemoryAuditSink
 from app.container import build_container
-from app.domain.messages import NO_PRODUCT, OUT_OF_SCOPE, PRODUCT_API_ERROR
-from app.domain.principal import Role
+from app.domain.messages import NO_INFO, OUT_OF_SCOPE, PRODUCT_API_ERROR
 from app.nlu.engine import NLUEngine
 from app.nlu.extract import asked_fields, budget, money
 from app.nlu.lexicon import Lexicon, fold
@@ -25,8 +24,8 @@ from tests.conftest import build_live, make_settings, principal
 LINE = re.compile(r"^- .+ — (\d{1,3}(?:\.\d{3})*đ|chưa có giá)$")
 
 
-def ask(loop, agent, msg, sid=None, role=Role.GUEST):
-    return loop.run_until_complete(agent.handle_turn(message=msg, principal=principal(role, "u-hard"),
+def ask(loop, agent, msg, sid=None):
+    return loop.run_until_complete(agent.handle_turn(message=msg, principal=principal(),
                                                      profile=AgentProfile.CUSTOMER, request_id="req-hard-0001", session_id=sid))
 
 
@@ -77,7 +76,7 @@ def test_out_of_scope_detected_deterministically(msg):
 
 @pytest.mark.parametrize("msg,intent", [
     ("giá KTV01", Intent.PRODUCT_DETAIL), ("bàn ăn 6 người dưới 10 triệu", Intent.RECOMMEND),
-    ("shop mở cửa mấy giờ", Intent.STORE_INFO), ("chính sách đổi trả", Intent.POLICY),
+    ("shop mở cửa mấy giờ", Intent.SUPPLIER_INFO), ("chính sách đổi trả", Intent.POLICY),
     ("có bàn gỗ không", Intent.PRODUCT_SEARCH), ("show me tables under 3 million", Intent.RECOMMEND),
     ("ok cảm ơn", Intent.GREETING), ("có đèn ngủ không", Intent.PRODUCT_SEARCH),
 ])
@@ -143,7 +142,7 @@ def test_recommendations_match_real_catalog(loop, agent_live, catalog, msg, cate
     items = items_of(r)
     lines = r.message.splitlines()
     if not items:
-        assert r.message == NO_PRODUCT
+        assert r.message == NO_INFO
         return
     assert 1 <= len(items) <= 5 and len(lines) == len(items) and all(LINE.match(x) for x in lines)
     for it in items:
@@ -169,7 +168,7 @@ def test_long_identifier_is_a_code_not_a_price(text):
 def test_non_existent_identifier(loop, agent_live, truth, msg):
     assert truth.get("product_variants", select="id", sku="eq.TEST_NON_EXISTENT_PRODUCT_987654321") == []
     r = ask(loop, agent_live, msg)
-    assert r.message == NO_PRODUCT and r.blocks == [] and r.sources == []
+    assert r.message == NO_INFO and r.blocks == [] and r.sources == []
 
 
 @live
@@ -177,7 +176,7 @@ def test_non_existent_identifier(loop, agent_live, truth, msg):
                                  "sofa dưới 100 nghìn", "tủ quần áo màu hồng"])
 def test_no_matching_product_says_not_updated(loop, agent_live, msg):
     r = ask(loop, agent_live, msg)
-    assert r.message == NO_PRODUCT
+    assert r.message == NO_INFO
 
 
 @live

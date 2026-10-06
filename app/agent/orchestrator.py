@@ -1,10 +1,10 @@
 """
 AgentService — điều phối một lượt hội thoại.
 
-REQUEST → NLU (LLM có kiểm soát + trích xuất deterministic) → với MỖI ý:
-  Planner (ngữ cảnh, làm rõ) → Tool qua executor (permission → validate) → cập nhật memory
-  mutation: WAITING_CONFIRMATION (dừng, không thực thi)
+REQUEST → NLU (domain guard + deterministic trước, LLM khi cần) → với MỖI ý:
+  Planner (ngữ cảnh, làm rõ) → Tool CHỈ ĐỌC qua executor (permission → validate) → cập nhật memory
 → COMPOSE (chỉ từ dữ liệu tool) → RESPONSE (contract app/api/schemas.py)
+Agent không thay đổi dữ liệu; confirm/cancel giữ chữ ký cũ cho tương thích Backend nhưng không còn action nào.
 """
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.agent import composer
-from app.agent.actions import ActionError, ActionService
 from app.agent.dialogue import DialogueState, ShownProduct
 from app.agent.executor import ToolExecutor
 from app.agent.planner import Planner, Step
@@ -24,7 +23,7 @@ from app.api.schemas import AgentResponse, ErrorOut, MetaOut
 from app.audit import AuditLogger
 from app.config import Settings
 from app.domain import errors
-from app.domain.actions import PendingAction
+from app.domain.messages import ACTIONS_DISABLED
 from app.domain.principal import Principal
 from app.domain.results import ToolResult, ToolStatus
 from app.nlu.engine import NLUEngine
@@ -50,12 +49,11 @@ class TurnTrace:
 
 class AgentService:
     def __init__(self, *, settings: Settings, ports: Ports, registry: ToolRegistry, executor: ToolExecutor,
-                 actions: ActionService, sessions: SessionStore, audit: AuditLogger, nlu: NLUEngine):
+                 sessions: SessionStore, audit: AuditLogger, nlu: NLUEngine):
         self.settings = settings
         self.ports = ports
         self.registry = registry
         self.executor = executor
-        self.actions = actions
         self.sessions = sessions
         self.audit = audit
         self.nlu = nlu
@@ -82,19 +80,15 @@ class AgentService:
         trace.nlu = nlu
         if nlu.injection_suspected:
             self.audit.log("security.injection_suspected", request_id=request_id, user_id=principal.audit_id,
-                           role=principal.role.value, status="flagged", extra={"message_excerpt": message[:200]})
+                           status="flagged", extra={"message_excerpt": message[:200]})
 
-        primary = nlu.primary.intent
-        if primary == Intent.CONFIRM:
-            resp = await self._confirm_from_chat(ctx, nlu.confirm_code)
-            return self._finish(state, message, resp, trace, started)
-        if primary == Intent.CANCEL:
-            return self._finish(state, message, self._cancel_from_chat(ctx), trace, started)
+        if nlu.primary.intent == Intent.CHANGE_REQUEST:
+            self.audit.log("agent.change_request_refused", request_id=request_id, user_id=principal.audit_id,
+                           status="refused")
 
         segments: list[str] = []
         blocks, sources, tools_used = [], [], []
         results: list[ToolResult] = []
-        action: PendingAction | None = None
         clarified = False
         for frame in nlu.frames[: self.settings.MAX_TOOL_CALLS_PER_TURN]:
             step = self.planner.plan(frame, state)
@@ -104,15 +98,10 @@ class AgentService:
                 segments.append(step.message or "")
                 continue
             if step.kind == "clarify":
-                denied = self._denied_for(step.tool, ctx) if step.tool else None
-                if denied is not None:
-                    results.append(denied)
-                    segments.append(denied.message or "")
-                    continue
                 clarified = True
                 segments.append(step.message or composer.CLARIFY)
                 continue
-            frame_results, action = await self._run_step(step, ctx, state, tools_used, trace)
+            frame_results = await self._run_step(step, ctx, state, tools_used, trace)
             results += frame_results
             shown = frame_results
             if step.note and any(r.tool == "recommend_products" for r in frame_results):
@@ -124,13 +113,6 @@ class AgentService:
             sources += composed.sources
             if composed.kind == "clarification":
                 clarified = True
-            if action is not None:
-                break
-
-        if action is not None:
-            resp = self._response(ctx, "confirmation_required", composer.confirmation_message(action),
-                                  action=composer.action_view(action, include_code=True), tools_used=tools_used, nlu=nlu)
-            return self._finish(state, message, resp, trace, started)
 
         text = "\n\n".join(s for s in segments if s) or composer.CLARIFY
         ok = any(r.status == ToolStatus.OK for r in results)
@@ -143,27 +125,21 @@ class AgentService:
             resp = self._response(ctx, rtype, text, blocks=blocks, sources=sources, tools_used=tools_used, nlu=nlu)
         return self._finish(state, message, resp, trace, started)
 
+    # ---- Tương thích Backend (/api/admin/ai-agent/actions/{id}/confirm|cancel): agent không còn tạo action.
     async def confirm_action(self, *, action_id: str, code: str, principal: Principal, profile: AgentProfile,
                              request_id: str, session_id: str | None = None) -> AgentResponse:
-        ctx = self._ctx(principal, profile, request_id, session_id)
-        return await self._do_confirm(ctx, action_id, code)
+        return self._no_action(self._ctx(principal, profile, request_id, session_id))
 
     def cancel_action(self, *, action_id: str, principal: Principal, profile: AgentProfile, request_id: str,
                       session_id: str | None = None) -> AgentResponse:
-        ctx = self._ctx(principal, profile, request_id, session_id)
-        try:
-            action = self.actions.cancel(action_id, principal, request_id)
-        except ActionError as exc:
-            return self._response(ctx, "error", exc.message, error=ErrorOut(code=exc.code, message=exc.message))
-        return self._response(ctx, "action_result", composer.action_result_message(action),
-                              action=composer.action_view(action, include_code=False))
+        return self._no_action(self._ctx(principal, profile, request_id, session_id))
 
-    def get_action(self, *, action_id: str, principal: Principal) -> PendingAction:
-        return self.actions.get(action_id, principal)
+    def _no_action(self, ctx: ToolContext) -> AgentResponse:
+        return self._response(ctx, "error", ACTIONS_DISABLED, error=ErrorOut(code="ACTION_NOT_FOUND", message=ACTIONS_DISABLED))
 
     # ------------------------------------------------------------------ steps
     async def _run_step(self, step: Step, ctx: ToolContext, state: DialogueState, tools_used: list[str],
-                        trace: TurnTrace) -> tuple[list[ToolResult], PendingAction | None]:
+                        trace: TurnTrace) -> list[ToolResult]:
         results: list[ToolResult] = []
         if step.needs_reference_detail:
             # Bước 1: đọc sản phẩm tham chiếu thật (giá/kích thước) → Bước 2: tìm mẫu rẻ hơn/nhỏ hơn…
@@ -172,7 +148,7 @@ class AgentService:
             trace.results.append(out.result)
             self._update_state(state, out.result)
             if not out.result.ok:
-                return [out.result], None
+                return [out.result]
             ref = state.active
             assert ref is not None and step.note is not None
             if step.note == "cheaper":
@@ -185,7 +161,7 @@ class AgentService:
         trace.results.append(out.result)
         self._update_state(state, out.result)
         results.append(out.result)
-        return results, out.action
+        return results
 
     @staticmethod
     def _update_state(state: DialogueState, r: ToolResult) -> None:
@@ -212,17 +188,6 @@ class AgentService:
                              for x in r.data["rows"]])
             state.active = None
 
-    def _denied_for(self, tool: str, ctx: ToolContext) -> ToolResult | None:
-        spec = self.registry.get(tool)
-        if spec is None:
-            return None
-        decision = self.registry.check(spec, ctx.principal, ctx.profile)
-        if decision.allowed:
-            return None
-        self.audit.log("permission.denied", request_id=ctx.request_id, user_id=ctx.principal.audit_id,
-                       role=ctx.principal.role.value, status="denied", tool=tool, error=decision.reason)
-        return ToolResult(tool=tool, status=ToolStatus.DENIED, message=decision.reason, error_code="FORBIDDEN")
-
     async def warm_up(self) -> None:
         """Gọi khi khởi động: đánh thức Backend (Render ngủ khi rảnh) và nạp từ vựng, không chặn request."""
         await self._fetch_lexicon()
@@ -244,46 +209,12 @@ class AgentService:
         try:
             cats = await self.ports.catalog.list_categories(Principal.guest())
             mats = await self.ports.catalog.list_materials(Principal.guest())
-            self.nlu.lexicon.extend_from_catalog([c.name for c in cats], [m.name for m in mats])
+            sups = await self.ports.store.list_suppliers(Principal.guest())
+            self.nlu.lexicon.extend_from_catalog([c.name for c in cats], [m.name for m in mats], [s.name for s in sups])
             self._lexicon_loaded = True
         except errors.PortError as exc:
             self._lexicon_retry_at = time.monotonic() + LEXICON_RETRY_SECONDS
             logger.warning("Không nạp được từ vựng catalog: %s (thử lại sau %ds)", exc.code, LEXICON_RETRY_SECONDS)
-
-    # ------------------------------------------------------------------ confirmation
-    async def _confirm_from_chat(self, ctx: ToolContext, code: str | None) -> AgentResponse:
-        pending = self.actions.pending_in_session(ctx.principal, ctx.session_id)
-        if not pending:
-            return self._response(ctx, "clarification", "Hiện không có thay đổi nào đang chờ xác nhận.")
-        if not code:
-            codes = ", ".join(f"\"xác nhận {a.confirmation_code}\" ({a.summary})" for a in pending)
-            return self._response(ctx, "clarification", f"Để tránh xác nhận nhầm, vui lòng gửi kèm mã xác nhận: {codes}.")
-        target = next((a for a in pending if a.confirmation_code == code), None)
-        if target is None:
-            if len(pending) == 1:
-                target = pending[0]  # để ActionService đếm số lần nhập sai mã
-            else:
-                return self._response(ctx, "error", "Mã xác nhận không khớp với thay đổi nào đang chờ.",
-                                      error=ErrorOut(code="CONFIRMATION_MISMATCH", message="Mã xác nhận không đúng."))
-        return await self._do_confirm(ctx, target.id, code)
-
-    async def _do_confirm(self, ctx: ToolContext, action_id: str, code: str) -> AgentResponse:
-        try:
-            action = await self.actions.confirm(action_id, code, ctx)
-        except ActionError as exc:
-            view = composer.action_view(exc.action, include_code=False) if exc.action else None
-            return self._response(ctx, "error", exc.message, action=view, error=ErrorOut(code=exc.code, message=exc.message))
-        return self._response(ctx, "action_result", composer.action_result_message(action),
-                              action=composer.action_view(action, include_code=False))
-
-    def _cancel_from_chat(self, ctx: ToolContext) -> AgentResponse:
-        pending = self.actions.pending_in_session(ctx.principal, ctx.session_id)
-        if not pending:
-            return self._response(ctx, "clarification", "Hiện không có thay đổi nào đang chờ để hủy.")
-        cancelled = [self.actions.cancel(a.id, ctx.principal, ctx.request_id) for a in pending]
-        last = cancelled[-1]
-        msg = composer.action_result_message(last) if len(cancelled) == 1 else f"Đã hủy {len(cancelled)} thay đổi đang chờ xác nhận."
-        return self._response(ctx, "action_result", msg, action=composer.action_view(last, include_code=False))
 
     # ------------------------------------------------------------------ helpers
     def _ctx(self, principal: Principal, profile: AgentProfile, request_id: str, session_id: str | None) -> ToolContext:
@@ -304,7 +235,7 @@ class AgentService:
         return AgentResponse(
             type=rtype, message=message, session_id=ctx.session_id, request_id=ctx.request_id,
             blocks=blocks or [], sources=sources or [], action=action, error=error,
-            meta=MetaOut(profile=ctx.profile.value, role=ctx.principal.role.value,
+            meta=MetaOut(profile=ctx.profile.value, role="customer",  # agent không phân quyền: mọi request xử lý như khách
                          planner="llm" if nlu is not None and nlu.source == "llm+rules" else "rules",
                          tools_used=tools_used or [],
                          intents=[f.intent.value for f in nlu.frames] if nlu is not None else []),

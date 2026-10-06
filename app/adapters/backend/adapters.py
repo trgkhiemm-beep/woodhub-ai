@@ -1,25 +1,23 @@
 """
-Adapter REAL cho WoodHub Backend.
+Adapter REAL cho WoodHub Backend — CHỈ ĐỌC (mọi request là GET).
 
-Chỉ dùng các endpoint đã kiểm chứng trong OpenAPI snapshot. Năng lực mà Backend CHƯA có
-(thông tin cửa hàng, promotion, policy/FAQ, tồn kho công khai, tra SKU trực tiếp) ném
-CapabilityUnavailable — Agent sẽ trả "chưa có thông tin đã xác minh" thay vì bịa.
-Xem docs/BACKEND_INTEGRATION.md (Phần B) cho contract đề xuất của các GAP này.
+Chỉ dùng các endpoint đã kiểm chứng trong OpenAPI của Backend. Năng lực Backend CHƯA có (FAQ/hướng dẫn,
+tồn kho công khai, tra SKU trực tiếp) ném CapabilityUnavailable — Agent trả "chưa có thông tin đã xác minh"
+thay vì bịa. Xem docs/BACKEND_INTEGRATION.md.
 """
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import time
 from typing import Any
 
 from app.adapters.backend.client import BackendClient, require_dict, require_list
 from app.domain import errors
 from app.domain.models import (
-    Branch, DesignTask, InventoryInfo, KnowledgeDocument, KnowledgeHit, KnowledgeKind, NamedRef, PolicyType,
-    Product, ProductPage, ProductSummary, Promotion, PromotionStatus, SearchCriteria, StoreInfo, StoreStock, Variant,
+    Branch, CustomOrder, DesignTask, InventoryInfo, KnowledgeHit, KnowledgeKind, NamedRef, OrderStatusChange, Product,
+    ProductPage, ProductSummary, SearchCriteria, StoreStock, SupplierInfo, Variant,
 )
-from app.domain.principal import Principal, Role
+from app.domain.principal import Principal
 
 
 def _num(value: Any) -> float | None:
@@ -49,34 +47,6 @@ def _product_from_dto(dto: dict[str, Any]) -> Product:
         supplier_id=dto.get("supplierId"), supplier_name=dto.get("supplierName"),
         variants=variants, image_urls=[i["url"] for i in images], updated_at=dto.get("updatedAt"),
     )
-
-
-class BackendIdentityAdapter:
-    source_system = "backend"
-
-    def __init__(self, client: BackendClient, cache_seconds: int = 60):
-        self._client = client
-        self._ttl = cache_seconds
-        self._cache: dict[str, tuple[float, Principal]] = {}
-
-    async def resolve(self, access_token: str) -> Principal:
-        key = hashlib.sha256(access_token.encode()).hexdigest()
-        hit = self._cache.get(key)
-        if hit and hit[0] > time.monotonic():
-            return hit[1]
-        try:
-            dto = require_dict(await self._client.request("GET", "/api/users/me", access_token=access_token), "người dùng")
-        except (errors.Forbidden, errors.Unauthenticated, errors.NotFound) as exc:
-            raise errors.Unauthenticated("Token không hợp lệ hoặc đã hết hạn.", detail=exc.detail) from exc
-        if not dto.get("id"):
-            raise errors.MalformedResponse("Thiếu id người dùng từ Backend.")
-        principal = Principal(user_id=str(dto["id"]), role=Role.from_backend(dto.get("role")), email=dto.get("email"),
-                              display_name=dto.get("fullName"), access_token=access_token)
-        if self._ttl:
-            if len(self._cache) > 5000:
-                self._cache.clear()
-            self._cache[key] = (time.monotonic() + self._ttl, principal)
-        return principal
 
 
 class BackendCatalogAdapter:
@@ -164,89 +134,75 @@ class BackendCatalogAdapter:
     async def list_styles(self, principal: Principal) -> list[NamedRef]:
         return await self._named("/api/styles", principal)
 
-    async def update_product_description(self, product: Product, description: str, principal: Principal) -> Product:
-        # UpdateProductRequest bắt buộc name + categoryId → gửi lại giá trị hiện tại.
-        if not product.category_id:
-            raise errors.ValidationFailed("Thiếu categoryId hiện tại của sản phẩm để cập nhật.")
-        body = {"name": product.name, "description": description, "categoryId": product.category_id,
-                "materialId": product.material_id}
-        return _product_from_dto(await self._client.request("PUT", f"/api/products/{product.id}", principal, json=body))
-
-    async def update_variant_price(self, product: Product, variant_id: str, price: float, principal: Principal) -> Product:
-        variant = next((v for v in product.variants if v.id == variant_id), None)
-        if variant is None:
-            raise errors.NotFound("Không tìm thấy biến thể sản phẩm.")
-        body = {"price": price, "sku": variant.sku, "color": variant.color, "dimensions": variant.dimensions}
-        await self._client.request("PUT", f"/api/variants/{variant_id}", principal, json=body)
-        return await self.get_product(product.id, principal)
-
-    async def upsert_category(self, category_id: str | None, name: str, parent_id: str | None, principal: Principal) -> NamedRef:
-        body = {"name": name, "parentId": parent_id}
-        self._taxonomy_cache.clear()
-        if category_id:
-            dto = await self._client.request("PUT", f"/api/categories/{category_id}", principal, json=body)
-        else:
-            dto = await self._client.request("POST", "/api/categories", principal, json=body)
-        dto = require_dict(dto, "danh mục")
-        return NamedRef(id=str(dto["id"]), name=dto["name"], slug=dto.get("slug"), parent_id=dto.get("parentId"))
-
-    async def upsert_material(self, material_id: str | None, name: str, principal: Principal) -> NamedRef:
-        self._taxonomy_cache.clear()
-        if material_id:
-            dto = await self._client.request("PUT", f"/api/materials/{material_id}", principal, json={"name": name})
-        else:
-            dto = await self._client.request("POST", "/api/materials", principal, json={"name": name})
-        dto = require_dict(dto, "vật liệu")
-        return NamedRef(id=str(dto["id"]), name=dto["name"])
-
 
 class BackendInventoryAdapter:
-    """GET/PATCH tồn kho của Backend chỉ dành cho supplier sở hữu sản phẩm (RBAC của Backend)."""
+    """Tồn kho: Backend hiện chỉ trả cho nhà cung cấp sở hữu sản phẩm. Agent KHÔNG tự kiểm tra role — gọi Backend với
+    token được chuyển tiếp; Backend từ chối → coi là "chưa có dữ liệu tồn kho công khai" (không đoán)."""
     source_system = "backend"
 
     def __init__(self, client: BackendClient):
         self._client = client
 
     async def get_inventory(self, variant_id: str, principal: Principal) -> InventoryInfo:
-        if principal.role != Role.SUPPLIER:
-            raise errors.CapabilityUnavailable("Backend chưa có API tồn kho công khai (chỉ nhà cung cấp sở hữu sản phẩm xem được).")
-        dto = require_dict(await self._client.request("GET", f"/api/variants/{variant_id}/inventory", principal), "tồn kho")
+        try:
+            dto = require_dict(await self._client.request("GET", f"/api/variants/{variant_id}/inventory", principal), "tồn kho")
+        except (errors.Forbidden, errors.Unauthenticated) as exc:
+            raise errors.CapabilityUnavailable("Backend chưa công khai tồn kho của sản phẩm này.", detail=exc.detail) from exc
         stores = [StoreStock(store_id=str(s.get("storeId")), quantity=int(s.get("stockQuantity") or 0), updated_at=s.get("updatedAt"))
                   for s in (dto.get("stores") or []) if isinstance(s, dict)]
         sku = next((s.get("sku") for s in (dto.get("stores") or []) if isinstance(s, dict) and s.get("sku")), None)
         return InventoryInfo(variant_id=str(dto.get("variantId") or variant_id), sku=sku,
                              total=int(dto.get("totalStock") or 0), by_store=stores)
 
-    async def adjust_inventory(self, store_id: str, variant_id: str, delta: int, principal: Principal) -> InventoryInfo:
-        # PATCH theo delta KHÔNG idempotent → client không retry.
-        await self._client.request("PATCH", f"/api/stores/{store_id}/inventory/{variant_id}", principal, json={"delta": delta})
-        return await self.get_inventory(variant_id, principal)
-
 
 class BackendStoreAdapter:
+    """Nhà cung cấp (hồ sơ công khai) + cửa hàng/chi nhánh. Backend công khai: tên, mô tả, email, điện thoại; chi nhánh chỉ
+    có quận/thành phố. Backend KHÔNG có giờ mở cửa → agent nói chưa có thông tin."""
     source_system = "backend"
 
-    def __init__(self, client: BackendClient):
+    def __init__(self, client: BackendClient, cache_seconds: int = 300):
         self._client = client
+        self._ttl = cache_seconds
+        self._suppliers: tuple[float, list[SupplierInfo]] | None = None
 
-    async def get_store_info(self, principal: Principal) -> StoreInfo:
-        raise errors.CapabilityUnavailable("Backend chưa có API thông tin cửa hàng (hotline, giờ mở cửa).")
+    @staticmethod
+    def _supplier(dto: dict[str, Any]) -> SupplierInfo:
+        if not dto.get("id") or not dto.get("businessName"):
+            raise errors.MalformedResponse("Nhà cung cấp từ Backend thiếu id/businessName.", detail=repr(dto)[:200])
+        return SupplierInfo(id=str(dto["id"]), name=dto["businessName"], type=dto.get("type"),
+                            description=dto.get("description"), phone=dto.get("contactPhone"), email=dto.get("contactEmail"))
+
+    async def list_suppliers(self, principal: Principal) -> list[SupplierInfo]:
+        """Danh sách nhà cung cấp công khai (cache ngắn: dữ liệu hồ sơ, không phải giá/tồn kho)."""
+        if self._suppliers and self._suppliers[0] > time.monotonic():
+            return self._suppliers[1]
+        data = require_dict(await self._client.request("GET", "/api/suppliers/public", principal,
+                                                       params={"size": 50}), "nhà cung cấp")
+        items = [self._supplier(s) for s in require_list(data.get("content", []), "nhà cung cấp") if isinstance(s, dict)]
+        self._suppliers = (time.monotonic() + self._ttl, items)
+        return items
+
+    async def get_supplier(self, supplier_id: str, principal: Principal) -> SupplierInfo:
+        dto = require_dict(await self._client.request("GET", f"/api/suppliers/{supplier_id}/public", principal), "nhà cung cấp")
+        info = self._supplier(dto)
+        stores = require_list(await self._client.request("GET", f"/api/suppliers/{supplier_id}/stores", principal), "cửa hàng")
+        info.stores = [Branch(id=str(st.get("id")), name=info.name, district=st.get("district"), city=st.get("city"),
+                              kind=st.get("supplierType"), supplier_id=info.id)
+                       for st in stores if isinstance(st, dict) and st.get("id")]
+        return info
 
     async def list_branches(self, principal: Principal, city: str | None = None) -> list[Branch]:
         """Cửa hàng của các nhà cung cấp bán lẻ (Backend chỉ công khai quận/thành phố)."""
-        data = require_dict(await self._client.request("GET", "/api/suppliers/public", principal,
-                                                       params={"type": "retailer", "size": 10}), "nhà cung cấp")
-        suppliers = [s for s in require_list(data.get("content", []), "nhà cung cấp") if isinstance(s, dict) and s.get("id")]
         branches: list[Branch] = []
-        for s in suppliers:
-            stores = require_list(await self._client.request("GET", f"/api/suppliers/{s['id']}/stores", principal), "cửa hàng")
+        for s in [x for x in await self.list_suppliers(principal) if x.type == "retailer"][:10]:
+            stores = require_list(await self._client.request("GET", f"/api/suppliers/{s.id}/stores", principal), "cửa hàng")
             for st in stores:
                 if not isinstance(st, dict):
                     continue
                 if city and city.lower() not in (st.get("city") or "").lower():
                     continue
-                branches.append(Branch(id=str(st.get("id")), name=s.get("businessName"), district=st.get("district"),
-                                       city=st.get("city"), phone=s.get("contactPhone"), kind="retailer"))
+                branches.append(Branch(id=str(st.get("id")), name=s.name, district=st.get("district"),
+                                       city=st.get("city"), phone=s.phone, kind="retailer", supplier_id=s.id))
         return branches
 
     async def find_nearby_workshops(self, lat: float, lng: float, limit: int, principal: Principal) -> list[Branch]:
@@ -255,53 +211,47 @@ class BackendStoreAdapter:
         return [Branch(id=str(x.get("id")), name=x.get("businessName"),
                        address=", ".join(p for p in (x.get("address"), x.get("ward"), x.get("district"), x.get("city")) if p),
                        district=x.get("district"), city=x.get("city"), phone=x.get("phone"),
-                       distance_km=_num(x.get("distanceKm")), kind="workshop")
+                       distance_km=_num(x.get("distanceKm")), kind="workshop", supplier_id=x.get("supplierId"))
                 for x in data if isinstance(x, dict)]
 
-    async def update_store_info(self, changes: dict[str, Any], expected_version: int | None, principal: Principal) -> StoreInfo:
-        raise errors.CapabilityUnavailable("Backend chưa có API cập nhật thông tin cửa hàng.")
 
-
-class BackendPromotionAdapter:
+class BackendOrderAdapter:
+    """Đơn đặt làm (custom order) của chính người dùng — Backend chỉ trả đơn thuộc về token gửi kèm."""
     source_system = "backend"
-    _MSG = "Backend chưa có API khuyến mãi/voucher."
 
     def __init__(self, client: BackendClient):
         self._client = client
 
-    async def list_promotions(self, principal: Principal, status: PromotionStatus | None = None,
-                              category_id: str | None = None) -> list[Promotion]:
-        raise errors.CapabilityUnavailable(self._MSG)
+    @staticmethod
+    def _order(dto: dict[str, Any]) -> CustomOrder:
+        if not dto.get("id") or not dto.get("status"):
+            raise errors.MalformedResponse("Đơn hàng từ Backend thiếu id/status.", detail=repr(dto)[:200])
+        hist = [OrderStatusChange(from_status=h.get("fromStatus"), to_status=h.get("toStatus"), note=h.get("note"),
+                                  created_at=h.get("createdAt")) for h in (dto.get("history") or []) if isinstance(h, dict)]
+        return CustomOrder(id=str(dto["id"]), order_number=dto.get("orderNumber"), status=str(dto["status"]),
+                           workshop_name=dto.get("workshopName"), total_amount=_num(dto.get("totalAmount")),
+                           lead_time_days=dto.get("leadTimeDays"), created_at=dto.get("createdAt"),
+                           updated_at=dto.get("updatedAt"), history=hist)
 
-    async def get_promotion(self, promotion_id: str, principal: Principal) -> Promotion:
-        raise errors.CapabilityUnavailable(self._MSG)
+    async def list_my_orders(self, principal: Principal, limit: int = 5) -> list[CustomOrder]:
+        data = require_dict(await self._client.request("GET", "/api/custom-orders/my", principal,
+                                                       params={"size": limit, "sort": "updatedAt,DESC"}), "đơn hàng")
+        return [self._order(o) for o in require_list(data.get("content", []), "đơn hàng") if isinstance(o, dict)]
 
-    async def create_promotion(self, draft: dict[str, Any], principal: Principal, idempotency_key: str) -> Promotion:
-        raise errors.CapabilityUnavailable(self._MSG)
-
-    async def set_promotion_status(self, promotion_id: str, status: PromotionStatus, expected_version: int | None,
-                                   principal: Principal) -> Promotion:
-        raise errors.CapabilityUnavailable(self._MSG)
+    async def get_order(self, order_id: str, principal: Principal) -> CustomOrder:
+        return self._order(require_dict(await self._client.request("GET", f"/api/custom-orders/{order_id}", principal), "đơn hàng"))
 
 
 class BackendKnowledgeAdapter:
+    """FAQ/hướng dẫn Web/App. Backend/Supabase hiện CHƯA có nguồn (không có bảng FAQ) → CapabilityUnavailable,
+    agent trả "chưa có thông tin đã xác minh" thay vì dùng kiến thức của model."""
     source_system = "backend"
-    _MSG = "Backend chưa có API chính sách/FAQ/hướng dẫn."
+    _MSG = "Backend chưa có nguồn FAQ/hướng dẫn sử dụng."
 
     def __init__(self, client: BackendClient):
         self._client = client
 
-    async def get_policy(self, policy_type: PolicyType, principal: Principal) -> KnowledgeDocument:
-        raise errors.CapabilityUnavailable(self._MSG)
-
     async def search(self, query: str, kinds: list[KnowledgeKind], top_k: int, principal: Principal) -> list[KnowledgeHit]:
-        raise errors.CapabilityUnavailable(self._MSG)
-
-    async def get_document(self, document_id: str, principal: Principal) -> KnowledgeDocument:
-        raise errors.CapabilityUnavailable(self._MSG)
-
-    async def upsert_faq(self, document_id: str | None, question: str, answer: str, expected_version: int | None,
-                         principal: Principal) -> KnowledgeDocument:
         raise errors.CapabilityUnavailable(self._MSG)
 
 

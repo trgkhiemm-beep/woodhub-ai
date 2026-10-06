@@ -9,8 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.agent.composer import vnd
-from app.domain.messages import NO_PRODUCT
-from app.domain.principal import Role
+from app.domain.messages import BACKEND_DENIED, NO_INFO
 from app.main import create_app
 from app.tools.base import AgentProfile
 from tests.conftest import build_live, make_settings, principal
@@ -24,8 +23,8 @@ def agent(audit_sink):
     return container.agent
 
 
-def ask(loop, agent, msg, role=Role.GUEST, profile=AgentProfile.CUSTOMER, **kw):
-    return loop.run_until_complete(agent.handle_turn(message=msg, principal=principal(role), profile=profile,
+def ask(loop, agent, msg, profile=AgentProfile.CUSTOMER, **kw):
+    return loop.run_until_complete(agent.handle_turn(message=msg, principal=principal(), profile=profile,
                                                      request_id="req-test-0001", **kw))
 
 
@@ -87,7 +86,7 @@ def test_compare_two_real_products(loop, agent, truth):
 
 def test_unknown_product_is_not_invented(loop, agent):
     r = ask(loop, agent, "Giá ZZX999 bao nhiêu")
-    assert r.message == NO_PRODUCT
+    assert r.message == NO_INFO
 
 
 def test_categories_match_supabase(loop, agent, truth):
@@ -115,18 +114,27 @@ def test_inventory_for_guest_is_unknown_not_guessed(loop, agent, truth):
 
 # ---------------------------------------------------------------- knowledge chưa có trên Backend/Supabase
 @pytest.mark.parametrize("msg", [
-    "Giờ mở cửa là mấy giờ?", "Hotline của WoodHub là gì?", "Chính sách đổi trả thế nào?", "Bảo hành bao lâu?",
-    "Có voucher nào không?", "Hướng dẫn tạo mẫu 3D từ ảnh",
+    "Chính sách đổi trả thế nào?", "Bảo hành bao lâu?", "Có voucher nào không?", "Hướng dẫn tạo mẫu 3D từ ảnh",
 ])
 def test_missing_knowledge_answers_unverified(loop, agent, msg):
     r = ask(loop, agent, msg)
-    assert "chưa có thông tin đã xác minh" in r.message
+    assert "chưa có thông tin đã xác minh" in r.message or r.message == NO_INFO
     assert no_unverified_numbers(r.message) and not r.sources
 
 
-def test_workshops_require_login(loop, agent):
+@pytest.mark.parametrize("msg", ["Giờ mở cửa là mấy giờ?", "Hotline của shop là gì?"])
+def test_contact_question_without_supplier_asks_which_supplier(loop, agent, truth, msg):
+    # WoodHub là sàn nhiều nhà cung cấp: không có "thông tin cửa hàng chung" → hỏi lại, gợi ý nhà cung cấp THẬT
+    r = ask(loop, agent, msg)
+    real = {s["business_name"] for s in truth.get("suppliers", select="business_name")}
+    shown = {b["name"] for b in r.blocks[0].data} if r.blocks else set()
+    assert r.type == "clarification" and "nhà cung cấp nào" in r.message and shown and shown <= real
+
+
+def test_workshops_access_decided_by_backend(loop, agent):
+    # Agent không tự chặn guest: gọi Backend (API này của Backend yêu cầu đăng nhập) và chuyển lời từ chối của Backend
     r = ask(loop, agent, "Tìm xưởng gần tôi", location=(10.77, 106.70))
-    assert "đăng nhập" in r.message
+    assert r.meta.tools_used == ["find_nearby_workshops"] and r.message == BACKEND_DENIED
 
 
 def test_out_of_scope_and_cart(loop, agent):
@@ -147,7 +155,7 @@ def test_http_chat_contract(http, truth):
     res = http.post("/v1/agent/chat", json={"message": "Giá KTV01"})
     assert res.status_code == 200
     body = res.json()
-    assert body["type"] == "answer" and body["meta"]["role"] == "guest" and body["meta"]["profile"] == "customer"
+    assert body["type"] == "answer" and body["meta"]["role"] == "customer" and body["meta"]["profile"] == "customer"
     assert body["session_id"] and body["request_id"]
     assert vnd(float(real["product_variants"][0]["price"])) in body["message"]
 
@@ -169,14 +177,17 @@ def test_legacy_chat_sse_keeps_old_shape_with_real_ids(http, truth):
     assert set(products[0]) >= {"id", "name", "description", "price", "status"}
 
 
-def test_invalid_token_rejected_by_real_backend(http):
-    res = http.post("/v1/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer not-a-real-token"})
-    assert res.status_code == 401 and res.json()["code"] == "UNAUTHENTICATED"
+def test_agent_does_not_validate_user_tokens(http, truth):
+    # Agent không xác thực người dùng: token lạ/không có token không làm Agent từ chối; dữ liệu công khai vẫn trả về
+    real = truth.active_product_named("KTV01")
+    for headers in ({}, {"Authorization": "Bearer not-a-real-token"}, {"Authorization": "Basic xyz"}):
+        res = http.post("/v1/agent/chat", json={"message": "Giá KTV01"}, headers=headers)
+        assert res.status_code == 200 and res.json()["message"].startswith(f"- {real['name']} — ")
 
 
-def test_guest_cannot_use_management_agent(http):
+def test_manage_route_is_the_same_read_only_assistant(http):
     res = http.post("/v1/agent/manage/chat", json={"message": "Đổi giá KTV01 thành 1000đ"})
-    assert res.status_code == 401 and res.json()["code"] == "UNAUTHENTICATED"  # chưa đăng nhập → 401 (role sai → 403)
+    assert res.status_code == 200 and "không thay đổi dữ liệu" in res.json()["message"] and res.json()["action"] is None
 
 
 def test_validation_error_envelope(http):

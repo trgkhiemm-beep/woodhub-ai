@@ -1,6 +1,12 @@
-"""Dependency: request id, xác thực (JWT của Backend), phân quyền endpoint quản trị, rate limit."""
+"""
+Dependency: request id, ngữ cảnh người gọi, bảo vệ server-to-server (tùy chọn), rate limit.
+
+Agent KHÔNG xác thực/phân quyền người dùng (Backend làm việc đó). `Authorization: Bearer …` do Backend gửi kèm chỉ được
+mang theo nguyên trạng để gọi lại Backend — không giải mã, không kiểm tra, không bao giờ là lý do để Agent từ chối request.
+"""
 from __future__ import annotations
 
+import hmac
 import logging
 import time
 import uuid
@@ -9,10 +15,10 @@ from collections import defaultdict, deque
 from fastapi import Depends, HTTPException, Request
 
 from app.container import Container
-from app.domain import errors
-from app.domain.principal import Principal, Role
+from app.domain.principal import Principal
 
-logger = logging.getLogger("woodhub.auth")  # chỉ log kết quả + role + path; KHÔNG log token/secret/header
+logger = logging.getLogger("woodhub.api")  # không log token/secret/header
+SERVICE_KEY_HEADER = "X-Agent-Api-Key"
 
 
 def get_container(request: Request) -> Container:
@@ -24,44 +30,28 @@ def request_id(request: Request) -> str:
     return rid if 8 <= len(rid) <= 64 and rid.replace("-", "").isalnum() else str(uuid.uuid4())
 
 
-def _unauthenticated(message: str) -> HTTPException:
-    return HTTPException(status_code=401, detail={"code": "UNAUTHENTICATED", "message": message})
+def verify_service_key(request: Request, container: Container = Depends(get_container)) -> None:
+    """Bảo vệ SERVER-TO-SERVER (Backend → Agent), không phải xác thực người dùng.
+    Chỉ bật khi cấu hình AGENT_SERVICE_API_KEY; khi bật, request phải mang header X-Agent-Api-Key đúng giá trị."""
+    expected = container.settings.AGENT_SERVICE_API_KEY
+    if expected is None or not expected.get_secret_value():
+        return
+    given = request.headers.get(SERVICE_KEY_HEADER, "")
+    if not hmac.compare_digest(given.encode(), expected.get_secret_value().encode()):
+        logger.info("service_key=rejected path=%s", request.url.path)
+        raise HTTPException(status_code=401, detail={"code": "SERVICE_UNAUTHORIZED",
+                                                     "message": "Request không đến từ dịch vụ được phép."})
 
 
-async def current_principal(request: Request, container: Container = Depends(get_container)) -> Principal:
-    """Không có token → guest. Token sai/hết hạn → 401 (không âm thầm hạ xuống guest).
-    Role CHỈ lấy từ token đã verify — không bao giờ từ body, query hay nội dung tin nhắn."""
-    header = request.headers.get("Authorization", "")
-    if not header:
-        return Principal.guest()
-    scheme, _, token = header.partition(" ")
-    if scheme.lower() != "bearer" or not token.strip():
-        raise _unauthenticated("Authorization phải là Bearer token.")
-    try:
-        principal = await container.ports.identity.resolve(token.strip())
-    except errors.Unauthenticated as exc:
-        logger.info("auth=rejected reason=%s path=%s", (exc.detail or exc.code)[:60], request.url.path)
-        raise _unauthenticated(exc.message) from exc
-    except errors.PortError as exc:
-        raise HTTPException(status_code=503, detail={"code": "AUTH_UNAVAILABLE",
-                                                     "message": "Không xác thực được do hệ thống tài khoản không phản hồi."}) from exc
-    logger.info("auth=ok role=%s path=%s", principal.role.value, request.url.path)
-    return principal
-
-
-async def management_principal(request: Request, principal: Principal = Depends(current_principal)) -> Principal:
-    """Endpoint quản trị: thiếu/sai/hết hạn token → 401; token hợp lệ nhưng không phải admin/supplier → 403."""
-    if principal.role == Role.GUEST:
-        raise _unauthenticated("Cần đăng nhập bằng tài khoản quản trị hoặc nhà cung cấp.")
-    if principal.role not in (Role.ADMIN, Role.SUPPLIER):
-        logger.info("auth=forbidden role=%s path=%s", principal.role.value, request.url.path)
-        raise HTTPException(status_code=403, detail={"code": "FORBIDDEN",
-                                                     "message": "Chỉ quản trị viên hoặc nhà cung cấp được dùng trợ lý quản trị."})
-    return principal
+def caller(request: Request, _: None = Depends(verify_service_key)) -> Principal:
+    """Ngữ cảnh người gọi: chỉ mang theo token Backend gửi kèm (nếu có), KHÔNG kiểm tra."""
+    scheme, _sep, token = request.headers.get("Authorization", "").partition(" ")
+    return Principal(access_token=token.strip() or None) if scheme.lower() == "bearer" else Principal.guest()
 
 
 class RateLimiter:
-    """Sliding window theo user/IP (in-memory, một instance)."""
+    """Sliding window theo client (in-memory, một instance) — chống lạm dụng dịch vụ, KHÔNG phải quota người dùng
+    (quota ai_chat do Backend quản lý). Khi Agent nằm sau Backend, mọi request có thể cùng một IP → đặt ngưỡng phù hợp."""
 
     def __init__(self, per_minute: int):
         self._limit = per_minute
@@ -73,22 +63,13 @@ class RateLimiter:
         while q and now - q[0] > 60:
             q.popleft()
         if len(q) >= self._limit:
-            raise HTTPException(status_code=429, detail={"code": "RATE_LIMITED", "message": "Bạn gửi quá nhanh, vui lòng thử lại sau ít phút."})
+            raise HTTPException(status_code=429, detail={"code": "RATE_LIMITED", "message": "Hệ thống đang quá tải, vui lòng thử lại sau ít phút."})
         q.append(now)
         if len(self._hits) > 20000:
             self._hits.clear()
 
 
-def _rate_limit(request: Request, principal: Principal) -> Principal:
+async def rate_limited_caller(request: Request, principal: Principal = Depends(caller)) -> Principal:
     limiter: RateLimiter = request.app.state.rate_limiter
-    key = principal.user_id or (request.client.host if request.client else "unknown")
-    limiter.check(key)
+    limiter.check(request.client.host if request.client else "unknown")
     return principal
-
-
-async def rate_limited_principal(request: Request, principal: Principal = Depends(current_principal)) -> Principal:
-    return _rate_limit(request, principal)
-
-
-async def rate_limited_manager(request: Request, principal: Principal = Depends(management_principal)) -> Principal:
-    return _rate_limit(request, principal)

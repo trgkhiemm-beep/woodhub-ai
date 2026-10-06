@@ -1,178 +1,209 @@
-# WoodHub AI Agent — Architecture (v1.2 — hardened)
+# WoodHub AI Agent — Architecture (v2.1 — customer-facing, read-only, no user auth)
 
-> Tài liệu khớp với code trên nhánh `feature/ai-agent`. Contract: `docs/FRONTEND_INTEGRATION.md`, `docs/BACKEND_INTEGRATION.md`.
+> Tài liệu khớp với code trên nhánh `feature/ai-agent`. Contract: `docs/FRONTEND_INTEGRATION.md`, `docs/BACKEND_INTEGRATION.md`,
+> `contracts/agent-api.openapi.json`.
+
+Agent là **trợ lý cho khách hàng của sàn nội thất WoodHub (nhiều nhà cung cấp)**: hiểu câu hỏi → tìm → truy xuất → so sánh →
+tư vấn → trả lời, **chỉ đọc** dữ liệu thật. Mọi thay đổi dữ liệu (giá, tồn kho, mô tả, danh mục, khuyến mãi, FAQ) do
+Admin/Supplier làm qua Backend Admin API — không qua agent.
+
+| Thành phần | Trách nhiệm |
+|---|---|
+| **WoodHub Backend** | AUTH + USER ACCESS CONTROL: đăng nhập/đăng ký, phát hành & kiểm tra JWT, role/permission, quyết định ai được gọi chat (khách `/api/ai-chat`, admin `/api/admin/ai-agent`) và ai được xem dữ liệu riêng |
+| **AI Agent** | NATURAL LANGUAGE + RETRIEVAL + RECOMMENDATION + ORCHESTRATION — **không** xác thực người dùng, **không** đọc JWT, **không** phân quyền admin/supplier/customer, **không** tự chặn người chưa đăng nhập |
+| **Supabase** | SOURCE OF TRUTH (Agent chỉ đọc qua Backend API) |
+
+```text
+Customer → Frontend / App → WoodHub Backend → AI Agent → Backend APIs (GET) → Supabase
+                              (auth, quota,      (understand, search,
+                               business logic,    retrieve, compare,
+                               CRUD, lưu chat)    recommend, answer)
+```
 
 ## 1. Quyết định chính
 
 | ID | Quyết định | Lý do |
 |---|---|---|
-| DEC-1 | Hai agent trên một core: Customer (`/v1/agent/chat`) và Management (`/v1/agent/manage/chat`) | cùng orchestrator, khác profile/tool |
-| DEC-2 | Role theo Backend: `guest`, `customer`, `supplier`, `admin`. Supplier chỉ có tool trên dữ liệu của mình | tôn trọng RBAC thật |
-| DEC-4 | Admin không sửa giá/tồn kho/mô tả sản phẩm của supplier | Backend chỉ cho supplier chủ |
-| DEC-5 | **Backend là source of truth duy nhất**; AI service không truy cập DB | an toàn, không trùng lặp |
-| DEC-6 | **NLU lai có kiểm soát**: LLM (Bedrock Converse, Gemma 3 4B) phân loại ý + tách câu; code trích xuất mọi giá trị | xem §3 |
-| DEC-9 | Mọi mutation cần xác nhận gắn action_id + mã | không thực thi nhầm |
+| DEC-1 | Một agent hướng khách hàng. `/v1/agent/chat` và `/v1/agent/manage/chat` (Backend `/api/admin/ai-agent/chat` gọi tới) là **cùng một trợ lý chỉ đọc**; Agent không phân biệt người gọi | Backend đã tích hợp `/manage`; giữ route để không phá integration |
+| DEC-12 | **Không có xác thực/phân quyền người dùng trong Agent** (v2.1): không verify JWT, không đọc role, không 401/403 vì người dùng. `Authorization` do Backend gửi kèm chỉ được chuyển tiếp NGUYÊN TRẠNG khi gọi lại Backend cho dữ liệu riêng; Backend quyết định | một nguồn auth duy nhất (Backend), tránh lệch cấu hình secret/thuật toán |
+| DEC-13 | Bảo vệ dịch vụ bằng khóa server-to-server tùy chọn `AGENT_SERVICE_API_KEY` (header `X-Agent-Api-Key`) + mạng nội bộ; không dùng user JWT | Agent không public trần khi bật khóa |
+| DEC-2 | **Agent CHỈ ĐỌC**: không có tool ghi, allowlist Backend chỉ có GET; yêu cầu sửa/xóa/tạo dữ liệu → câu trả lời cố định "chỉ hỗ trợ tra cứu" | Supplier tự quản lý giá/sản phẩm; Backend là authorization boundary chính |
+| DEC-3 | `/v1/agent/actions/{id}` (GET/confirm/cancel) **giữ chữ ký** cho Backend; vì không còn action: GET → 404, confirm/cancel → 200 `type=error`, `ACTION_NOT_FOUND` | backward compatibility |
+| DEC-4 | **Thông tin theo NHÀ CUNG CẤP**: hotline/email/khu vực lấy theo supplier của sản phẩm hoặc ngữ cảnh; không có "thông tin cửa hàng chung" | WoodHub là sàn nhiều nhà cung cấp |
+| DEC-5 | **Backend là source of truth duy nhất**; AI service không truy cập DB, không giữ secret Supabase ở runtime | an toàn, không trùng lặp |
+| DEC-6 | **NLU lai, deterministic trước**: domain guard + bộ luật; LLM (Bedrock Converse, Gemma 3 4B) chỉ khi bộ luật không chắc, chỉ phân loại ý + tách câu; code trích xuất mọi giá trị | tiết kiệm quota, không bịa entity |
+| DEC-7 | Không có dữ liệu → câu cố định; không dùng kiến thức của model cho sản phẩm/nhà cung cấp/chính sách (`app/domain/messages.py`) | chống hallucination |
+| DEC-8 | Không có policy engine giao hàng/đổi trả/bảo hành (thuộc từng nhà cung cấp; Backend chưa có dữ liệu) — không hứa thời gian/phí ship | đúng nghiệp vụ |
+| DEC-9 | Khuyến mãi: không còn tool/logic (Backend/Supabase chưa có dữ liệu) → "chưa cập nhật thông tin" | không tạo business logic mới |
+| DEC-10 | Câu trả lời ngắn `- Tên — 1.990.000đ`, 3–5 sản phẩm, chỉ trường được hỏi; dữ liệu đầy đủ trong `blocks` | đọc nhanh, ít token |
 | DEC-11 | Không dữ liệu mock trong runtime lẫn test | yêu cầu chủ dự án |
-| DEC-12 | Backend chưa có dữ liệu ⇒ câu cố định "Hiện hệ thống chưa cập nhật sản phẩm phù hợp." / "chưa có thông tin đã xác minh"; Backend lỗi ⇒ "Hệ thống chưa thể kiểm tra dữ liệu sản phẩm lúc này." (`app/domain/messages.py`) | không bịa, phân biệt rõ 3 trường hợp |
-| DEC-13 | **Domain guard + deterministic-first**: câu ngoài phạm vi bị từ chối bằng luật trước khi tới LLM; LLM chỉ được gọi khi bộ luật không chắc chắn | tiết kiệm quota, không trả lời lệch phạm vi |
-| DEC-14 | Câu trả lời ngắn: `- Tên — 1.990.000đ`, chỉ trường được hỏi; chi tiết nằm trong `blocks` | đọc nhanh, ít token |
+
+Câu cố định (`app/domain/messages.py`):
+
+| Trường hợp | Câu trả lời |
+|---|---|
+| Ngoài phạm vi WoodHub | `Xin lỗi, tôi chỉ hỗ trợ thông tin và dịch vụ trên WoodHub.` |
+| Không có dữ liệu phù hợp | `Hiện hệ thống chưa cập nhật thông tin phù hợp.` |
+| Backend lỗi/timeout/dữ liệu hỏng (sản phẩm, nhà cung cấp) | `Hệ thống chưa thể kiểm tra dữ liệu sản phẩm lúc này.` |
+| Yêu cầu thay đổi dữ liệu | `Trợ lý AI chỉ hỗ trợ tra cứu và tư vấn, không thay đổi dữ liệu. Vui lòng cập nhật qua trang quản trị của WoodHub.` |
+| Chưa có nguồn (chính sách, giờ hoạt động, FAQ) | `Hiện chưa có thông tin đã xác minh về …` |
 
 ## 2. Luồng xử lý
 
 ```text
-Frontend / Backend proxy ── contract agent-api v1 ──► app/api (verify JWT Backend HS256 tại chỗ, rate limit)
-                                                            │
-app/agent/orchestrator ── mỗi lượt ─────────────────────────┘
-  1. NLU  (app/nlu/engine)
-       xác nhận/hủy, lệnh thay đổi dữ liệu ─► parser deterministic (không qua LLM)
-       domain guard (ngoài phạm vi) ─► từ chối ngay, KHÔNG gọi LLM, không gọi tool
-       bộ luật tự tin ─► dùng luôn (≈95% lượt) · không chắc ─► LLM: intent + tách ý (span) ─► validate ─► đối chiếu
-       mọi entity (mã, tiền, số người, "mẫu 2", "cái này", rẻ/nhỏ hơn…) ─► trích xuất bằng code từ span
-  2. Với mỗi ý: Planner (app/agent/planner) + DialogueState (app/agent/dialogue)
-       thiếu thông tin quan trọng ─► hỏi lại (không đoán)
-       "rẻ hơn/nhỏ hơn" ─► đọc lại sản phẩm tham chiếu (realtime) ─► tìm theo ràng buộc mới
-  3. ToolExecutor: permission → validate (Pydantic, extra=forbid) → timeout → READ | PROPOSE mutation
-  4. Mutation: PendingAction ─(xác nhận đúng mã, đúng người, còn hạn)─► check_fresh ─► execute ─► verify ─► audit
-  5. Composer: câu trả lời CHỈ từ ToolResult + sources (provenance) ─► AgentResponse
-                                                            │
-app/ports.py (Protocol) ─► app/adapters/backend (allowlist 20 endpoint thật) ─► WoodHub Backend ─► Supabase
+Backend ── agent-api v1 ──► app/api (khóa server-to-server tùy chọn, rate limit, alias camelCase; KHÔNG xác thực người dùng)
+                                                    │
+app/agent/orchestrator ── mỗi lượt ─────────────────┘
+  1. NLU (app/nlu/engine)
+       yêu cầu thay đổi dữ liệu (app/nlu/patterns.py) ─► CHANGE_REQUEST ─► trả lời "chỉ đọc", không tool, audit
+       domain guard ─► ngoài phạm vi: từ chối ngay, KHÔNG gọi LLM, không gọi tool
+       bộ luật tự tin ─► dùng luôn (≈92–97% lượt) · không chắc ─► LLM: intent + span ─► validate ─► đối chiếu
+       entity (mã, tiền, số người, "mẫu 2", "cái này", rẻ/nhỏ hơn, tên nhà cung cấp, "shop này") ─► code trích xuất
+  2. Với mỗi ý: Planner + DialogueState (memory)
+       thiếu thông tin quan trọng ─► hỏi lại (không đoán); nhà cung cấp không xác định được ─► hỏi, gợi ý tên THẬT
+  3. ToolExecutor: validate (Pydantic, extra=forbid) → timeout → tool CHỈ ĐỌC (gọi Backend kèm token chuyển tiếp nguyên trạng)
+  4. Composer: câu trả lời CHỈ từ ToolResult + sources (provenance) ─► AgentResponse
+                                                    │
+app/ports.py (Protocol, chỉ đọc) ─► app/adapters/backend (allowlist 15 endpoint GET) ─► WoodHub Backend ─► Supabase
 ```
 
-## 3. NLU có kiểm soát (LLM + trích xuất deterministic)
+## 3. NLU có kiểm soát
 
-Thử nghiệm thực tế với Gemma 3 4B trên Bedrock (model đang cấu hình):
-- **Native tool use: không dùng được** — model nhận `toolConfig` nhưng bỏ qua, tự bịa câu trả lời.
-- **JSON có cấu trúc: tốt** — luôn hợp lệ, ~1 giây/lượt, hiểu không dấu/teencode/tiếng Anh/nhiều ý.
-- **Entity: không tin được** — tự bịa ("mẫu 2" → mã `MAU-02`, "bàn" → "tủ").
-
-Thiết kế vì vậy:
+Thử nghiệm với Gemma 3 4B trên Bedrock: native tool use không dùng được (model bỏ qua `toolConfig`); JSON có cấu trúc tốt
+(~1 giây); entity không tin được (tự bịa mã). Vì vậy:
 
 | Việc | Ai làm | File |
 |---|---|---|
-| Xác nhận / hủy / lệnh thay đổi dữ liệu + tham số | parser deterministic | `app/nlu/mutations.py` |
-| Intent + tách ý nhiều-ý | LLM → JSON `{intents:[{intent, span}]}`; span phải nằm trong câu gốc | `app/nlu/llm.py` |
-| Giá trị entity | code: mã model/SKU, tiền (`10 củ`, `8tr5`, `500k`, `10 million`), số người, số thứ tự, tham chiếu, so sánh tương đối, danh mục/chất liệu/màu/phòng (từ vựng VI/không dấu/EN + tên danh mục THẬT từ Backend) | `app/nlu/extract.py`, `app/nlu/lexicon.py` |
-| Domain guard | danh sách chủ đề ngoài phạm vi (thời tiết, chính trị, lập trình, toán, model/system prompt…) + tín hiệu thuộc cửa hàng; trả nguyên văn `Xin lỗi, tôi chỉ hỗ trợ thông tin và dịch vụ của cửa hàng.` | `app/nlu/rules.py` |
-| Chuẩn hóa giá | `2,5 triệu`, `2.5tr`, `2tr5`, `2 triệu 5`, `2 triệu rưỡi`, `2.500.000`, `2m5`, `2 trịu/trẹo`, `trj`, `củ`, `500k`; khoảng: dưới/tầm/khoảng/từ…đến/`2-3tr`/trở xuống/hơn/`<`; `6 người`, `dài 2m`, `1m2-1m6` không bị hiểu là tiền | `app/nlu/extract.py` |
-| Đối chiếu / dự phòng | bộ phân loại dựa trên tín hiệu entity, trả kèm độ tự tin (`classify_conf`); ghi đè nhãn LLM yếu (vd `out_of_scope` khi có mã sản phẩm, `design_task` khi không có mã task) và dùng khi LLM lỗi | `app/nlu/rules.py`, `app/nlu/engine.py` |
+| Nhận diện yêu cầu thay đổi dữ liệu / SQL / "xác nhận ABC" | regex deterministic (không có parser tham số) | `app/nlu/patterns.py` |
+| Domain guard | chủ đề ngoài phạm vi (thời tiết, chính trị, tin tức, thể thao, lập trình, toán, model/system prompt…) + tín hiệu thuộc WoodHub | `app/nlu/rules.py` |
+| Intent + tách ý | bộ luật (`classify_conf` kèm độ tự tin); LLM chỉ khi không chắc → JSON `{intents:[{intent, span}]}`, span phải nằm trong câu gốc | `app/nlu/rules.py`, `app/nlu/llm.py`, `app/nlu/engine.py` |
+| Giá trị entity | code: mã model/SKU, định danh dài (`TEST_..._987654321`), tiền, khoảng giá, số người, số thứ tự, tham chiếu, so sánh tương đối, danh mục/chất liệu/màu/phòng, **tên nhà cung cấp THẬT** (nạp từ Backend), "shop này", "khác nhà cung cấp", trường được hỏi | `app/nlu/extract.py`, `app/nlu/lexicon.py` |
+| Chuẩn hóa giá | `2,5 triệu`, `2.5tr`, `2tr5`, `2 triệu 5`, `2 triệu rưỡi`, `2.500.000`, `2m5`, `2 củ`, `2 trịu/trẹo`, `trj`, `500k`; dưới/tầm/khoảng/từ…đến/`2-3tr`/trở xuống/hơn/`<`; `6 người`, `dài 2m`, `1m2-1m6` không phải tiền | `app/nlu/extract.py` |
 
-LLM nhận ngữ cảnh đã làm sạch (danh sách vừa hiển thị, sản phẩm đang nói tới, câu hỏi đang chờ) — không nhận dữ liệu tool thô.
+Intent: `greeting, supplier_info, branches, policy, guide_faq, taxonomy, workshop, design_task, order_status, promotion,
+product_search, recommend, product_detail, inventory, compare, change_request, cart, out_of_scope, unclear`.
 
 ## 4. Memory & ngữ cảnh (`DialogueState`)
 
 | Trạng thái | Dùng cho |
 |---|---|
-| `shown` — danh sách vừa hiển thị | "mẫu 2", "cái thứ ba", "so sánh mẫu 1 và 2" |
-| `active` — sản phẩm đang nói tới | "cái này", "nó", "bàn này còn hàng không" |
-| `constraints` — nhu cầu tích lũy (loại, ngân sách, số người, kích thước, chất liệu, màu, phòng, sở thích giá) | "10 triệu", "có mẫu nhỏ hơn không?" |
-| `pending` / `asked` — câu hỏi làm rõ đang chờ, đã hỏi | hỏi tối đa một lần cho mỗi loại |
+| `shown` — danh sách vừa hiển thị | "mẫu 2", "so sánh mẫu 1 và 2" |
+| `active` — sản phẩm đang nói tới | "cái này", "shop này ở đâu" (→ nhà cung cấp của sản phẩm), "chính sách đổi trả của shop này" |
+| `constraints` — nhu cầu tích lũy | "10 triệu", "có mẫu nhỏ hơn không?" |
+| `pending` / `asked` — câu hỏi làm rõ đang chờ | hỏi tối đa một lần cho mỗi loại |
 
-Không lưu giá/tồn kho để trả lời lại, không lưu token. Session gắn chủ sở hữu, TTL 30 phút, giới hạn số session.
+Không lưu giá/tồn kho để trả lời lại, không lưu token. Session gắn chủ sở hữu, TTL 30 phút. Ngữ cảnh gửi LLM đã làm sạch.
 
 ## 5. Product Advisor (`recommend_products`)
 
-Nhu cầu → **1 truy vấn** danh sách (lọc giá phía Backend, danh mục lá theo `categoryId`; danh mục lấy từ cache 10 phút) →
-**ràng buộc cứng** trên dữ liệu thật → (chỉ khi tiêu chí cần: số chỗ/kích thước/màu) đọc chi tiết ≤8 sản phẩm → xếp hạng.
-- Loại bỏ mọi sản phẩm sai loại, ngoài ngân sách (min/max), sai chất liệu/màu, thiếu giá, thiếu kích thước/số chỗ khi tiêu chí cần
-  (không xác minh được = không gợi ý). **Không nới ngân sách, không gợi ý "gần đúng".**
-- Không còn sản phẩm → `NOT_FOUND` → "Hiện hệ thống chưa cập nhật sản phẩm phù hợp.".
-- Món không thuộc danh mục ("có đèn ngủ không") → tra theo tên trên catalog thật, không có → câu "chưa cập nhật".
-- Số chỗ bàn ăn: lấy từ tên/mô tả ("6 ghế"), nếu không có thì **ước tính** theo chiều dài (ghi rõ).
-- Phòng: dữ liệu `product_rooms` của Backend đang rỗng ⇒ dùng quan hệ "loại sản phẩm thường dùng cho phòng" (ghi rõ).
-- Kích thước hiển thị **nguyên văn** dữ liệu; bản parse (mm/cm) chỉ dùng để so sánh.
+Nhu cầu → **1 truy vấn** danh sách (lọc giá phía Backend; danh mục lá theo `categoryId`, cache 10 phút) → **ràng buộc cứng**
+trên dữ liệu thật → (chỉ khi cần số chỗ/kích thước/màu) đọc chi tiết ≤8 sản phẩm → xếp hạng → tối đa 3 (tư vấn) / 5 (tìm).
+- Loại mọi sản phẩm sai loại, ngoài ngân sách, sai chất liệu/màu, thiếu giá, thiếu dữ liệu cần thiết. Không nới ngân sách.
+- `distinct_suppliers` ("từ các nhà cung cấp khác nhau"): mỗi nhà cung cấp tối đa 1 mẫu; dòng trả lời kèm tên nhà cung cấp.
+- Mỗi item có `supplier`; so sánh (`compare_products`) có `supplier` từng dòng.
+- Không còn sản phẩm → `Hiện hệ thống chưa cập nhật thông tin phù hợp.`
 
-## 6. Tools (21)
+## 6. Tools (11, tất cả chỉ đọc)
 
-| Tool | Loại | Role | Xác nhận | Nguồn |
-|---|---|---|---|---|
-| recommend_products | SEARCH | all | — | `/api/products`, `/api/products/{id}` |
-| get_product | REALTIME | all | — | `/api/products/{id}` |
-| compare_products | READ | all | — | `/api/products/{id}` |
-| get_inventory | REALTIME | all (thực tế: supplier chủ) | — | `/api/variants/{id}/inventory` |
-| list_taxonomy | READ | all | — | `/api/categories|materials|rooms|styles` |
-| list_branches | READ | all | — | `/api/suppliers/public`, `/api/suppliers/{id}/stores` |
-| find_nearby_workshops | READ | đã đăng nhập | — | `/api/stores/nearby/workshops` |
-| get_design_task_status | REALTIME | đã đăng nhập | — | `/api/custom/ai/tasks/{id}` |
-| get_store_info, get_policy, search_knowledge, get_promotions | READ/SEARCH | all | — | **GAP** Backend (trả "chưa xác minh") |
-| update_product_description | UPDATE | supplier | standard | `PUT /api/products/{id}` |
-| update_product_price, adjust_inventory | SENSITIVE | supplier | strong | `PUT /api/variants/{id}`, `PATCH /api/stores/{sid}/inventory/{vid}` |
-| upsert_category, upsert_material | UPDATE | admin | standard | `POST/PUT /api/categories|materials` |
-| update_store_info, set_promotion_status | SENSITIVE | admin | strong | **GAP** |
-| upsert_faq | UPDATE | admin | standard | **GAP** |
-| create_promotion | ACTION | admin | strong | **GAP** |
+| Tool | Loại | Quyền xem dữ liệu | Nguồn (Backend) |
+|---|---|---|---|
+| recommend_products | SEARCH | all | `GET /api/products`, `/api/products/{id}` |
+| get_product | REALTIME | all | `GET /api/products/{id}` |
+| compare_products | READ | all | `GET /api/products/{id}` |
+| get_inventory | REALTIME | all (Backend chỉ trả cho supplier chủ) | `GET /api/variants/{id}/inventory` |
+| get_supplier_info | READ | all | `GET /api/suppliers/{id}/public`, `/api/suppliers/{id}/stores`, `/api/suppliers/public` |
+| list_branches | READ | all | `GET /api/suppliers/public`, `/api/suppliers/{id}/stores` |
+| list_taxonomy | READ | all | `GET /api/categories|materials|rooms|styles` |
+| search_knowledge (FAQ/hướng dẫn Web/App) | SEARCH | all | **chưa có nguồn** → "chưa có thông tin đã xác minh" |
+| find_nearby_workshops | READ | Backend quyết định (API yêu cầu đăng nhập) | `GET /api/stores/nearby/workshops` |
+| get_order_status | REALTIME | Backend quyết định (đơn của chủ token) | `GET /api/custom-orders/my`, `/api/custom-orders/{id}` |
+| get_design_task_status | REALTIME | Backend quyết định | `GET /api/custom/ai/tasks/{id}` |
 
-Không tồn tại (kiểm tra khi khởi động): `execute_sql`, `update_anything`, `run_arbitrary_command`, `http_request`, `confirm_action`, `delete_*`.
+Registry từ chối khi khởi động mọi tool không phải READ/SEARCH/REALTIME và các tên cấm (`execute_sql`, `update_*`,
+`create_promotion`, `adjust_inventory`, `delete_*`, `http_request`…). `BackendClient` chặn mọi method khác GET trước khi gửi.
 
-## 7. Permission, xác nhận, audit
+## 7. Truy cập & audit
 
-- **Permission 2 lớp**: `ToolRegistry.check` (profile × role × tool, kiểm tra trước validate, từ chối được audit) + Backend RBAC qua JWT của chính người dùng. "Tôi là admin" không đổi quyền; bị gắn cờ `security.injection_suspected`.
-- **State machine**: `PENDING_CONFIRMATION → CONFIRMED → EXECUTING → VERIFIED → COMPLETED`, nhánh `CANCELLED | EXPIRED | FAILED | UNVERIFIED`. Xác nhận bằng `xác nhận <MÃ>` hoặc `POST /v1/agent/actions/{id}/confirm`; "ok" không thực thi; sai mã 5 lần → hủy; xác nhận lặp không ghi lần 2; dữ liệu đổi trong lúc chờ → `STALE_DATA`; timeout khi ghi → `UNVERIFIED` (không báo thành công).
-- **Audit** (`app/audit.py`, JSONL): timestamp, request_id, user_id, role, action, action_id, tool, target, before, after, status, confirmation, error. Token/password/secret/key bị `[REDACTED]`.
+- **Agent không có lớp phân quyền người dùng.** Mọi tool chỉ đọc và giống nhau cho mọi người gọi. Dữ liệu riêng (đơn hàng,
+  task 3D, xưởng gần) chỉ trả khi **Backend** chấp nhận token mà Backend gửi kèm; Backend từ chối → Agent nói
+  "Hệ thống WoodHub chưa cho phép xem thông tin này…" (không tự tạo "Bạn cần đăng nhập"). Tồn kho bị Backend từ chối →
+  "chưa có dữ liệu tồn kho".
+- **Ai được gọi Agent**: Backend quyết định (chỉ admin tới được `/api/admin/ai-agent/*`). Agent bảo vệ server-to-server bằng
+  `AGENT_SERVICE_API_KEY` (tùy chọn) và rate limit theo IP client (chống lạm dụng; quota người dùng do Backend).
+- "Tôi là admin" trong tin nhắn bị gắn cờ `security.injection_suspected` và không thay đổi gì (không có gì để nâng quyền).
+- **Audit** (`app/audit.py`, JSONL): `security.injection_suspected`, `agent.change_request_refused`; token/password/secret bị
+  `[REDACTED]`; không log header `Authorization`.
 
 ## 8. Source of truth & provenance
 
 | Dữ liệu | Nguồn | Ghi chú |
 |---|---|---|
-| Giá, biến thể, tồn kho, trạng thái task | Backend, đọc trong lượt | không cache; "rẻ hơn/nhỏ hơn" đọc lại sản phẩm tham chiếu |
-| Danh mục, chất liệu, chi nhánh | Backend | từ vựng NLU nạp tên danh mục thật lúc khởi động |
-| Policy, FAQ, khuyến mãi, giờ mở cửa, hotline | chưa có (GAP) | trả "chưa có thông tin đã xác minh" |
+| Giá, biến thể, tồn kho, đơn hàng, task 3D | Backend, đọc trong lượt | không cache; "rẻ hơn/nhỏ hơn" đọc lại sản phẩm tham chiếu |
+| Danh mục, chất liệu, hồ sơ nhà cung cấp | Backend | cache ngắn (hồ sơ, không phải giá); tên nạp vào từ vựng NLU |
+| Chính sách NCC, giờ hoạt động, FAQ Web/App, khuyến mãi | chưa có trên Backend/Supabase | "chưa có thông tin đã xác minh" / "chưa cập nhật thông tin" |
 
-Mỗi response có `sources[]`: `system`, `resource`, `freshness` (realtime/reference/semantic), `fetched_at`, `record_id`, `version`, `verified`.
+Mỗi response có `sources[]`: `system`, `resource`, `freshness`, `fetched_at`, `record_id`, `version`, `verified`.
 
 ## 9. Bảo mật (đã kiểm thử)
 
 | Mối đe dọa | Biện pháp | Test |
 |---|---|---|
-| Prompt injection / fake admin | quyền từ JWT; LLM chỉ phân loại, không chọn tham số; tool ngoài quyền không tồn tại với profile | `test_customer_and_fake_admin_cannot_mutate`, eval nhóm `security` |
-| Privilege escalation | `/manage` chỉ admin/supplier (403); admin không sửa dữ liệu supplier | `test_guest_cannot_use_management_agent`, `test_admin_cannot_change_supplier_price` |
-| Tool abuse / tham số lạ | `extra=forbid`, allowlist endpoint, giới hạn tool call/lượt | `test_endpoint_allowlist_blocks_arbitrary_calls`, `test_llm_cannot_inject_entities` |
-| Confirmation bypass / replay | mã + chủ action + TTL + lock; LLM không bao giờ xử lý xác nhận | `test_confirmation_must_carry_code_and_match`, `test_confirmation_never_goes_through_llm` |
-| Mass update | không có tool bulk; khuyến mãi ≤50%, ≤5 danh mục; ≤5 action chờ/người | `test_mass_discount_is_blocked`, `test_pending_action_limit` |
-| Data / secret leakage | lỗi không lộ chi tiết; audit redaction; session gắn chủ; không có bí mật trong prompt | `test_audit_redacts_secrets`, `test_session_context_not_shared_between_users`, eval `sec-07` |
-| Hallucination | composer chỉ dùng ToolResult; eval kiểm mọi số tiền trong câu trả lời có trong dữ liệu tool | eval `hallucination_rate` |
+| Ghi dữ liệu trái phép | không có tool ghi; allowlist chỉ GET; registry fail-fast | `test_agent_is_read_only`, `test_writes_are_blocked_before_any_request`, `test_change_requests_refused_for_every_caller` |
+| Prompt injection / fake admin | không có quyền để nâng; agent chỉ đọc; LLM chỉ phân loại | `test_injection_and_fake_admin`, `test_guest_and_fake_admin_get_identical_answers` |
+| User JWT giả/lạ | Agent không dùng JWT để quyết định gì; chuyển tiếp nguyên trạng, Backend tự kiểm tra | `tests/test_no_user_auth.py` |
+| Gọi Agent trực tiếp từ ngoài | `AGENT_SERVICE_API_KEY` (tùy chọn) + mạng nội bộ | `test_service_key_is_optional_server_to_server_protection` |
+| Tool abuse / tham số lạ / SQL | `extra=forbid`, allowlist, không có SQL | `test_endpoint_allowlist_blocks_arbitrary_calls` |
+| Bịa sản phẩm / bỏ qua nguồn dữ liệu | composer chỉ dùng ToolResult; eval kiểm mọi số tiền | `test_cannot_bypass_data_source_or_invent`, eval `hallucination_rate` |
+| Lộ dữ liệu / secret | lỗi không lộ chi tiết; redaction; session gắn chủ | `test_audit_redacts_secrets`, `test_no_token_or_secret_in_logs` |
 
 ## 10. Agent Evaluation
 
-Bộ câu thực tế trên **dữ liệu thật** (`tests/eval/`): `cases` (105 câu), `holdout` (25), `holdout2` (20). Chạy `python -m tests.eval.run --mode rules|llm --suite …`.
+Bộ câu thực tế trên **dữ liệu thật** (`tests/eval/`): `cases` (105), `holdout` (25), `holdout2` (20); nhóm `read_only`
+thay cho nhóm mutation cũ. Chạy `python -m tests.eval.run --mode rules|llm --suite …`.
 
-| Bộ | Chế độ | Task completion | Intent | Tool | Tham số | Ngữ cảnh | Gợi ý | Làm rõ | Hallucination | Trái phép | Latency TB |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| cases | rules | 100% | 100% | 100% | 100% | 100% | 100% | 100% | 0% | 0% | 0,44 s |
-| cases | LLM (Gemma) | 100% | 100% | 100% | 100% | 100% | 100% | 100% | 0% | 0% | 0,97 s |
-| holdout — **trước** tinh chỉnh | rules / LLM | 84% / 80% | 100% / 100% | 87% / 83% | 100% / 89% | 67% / 100% | 100% / 86% | 100% / 100% | 0% | 0% | 0,5 / 1,2 s |
-| holdout — sau tinh chỉnh | rules / LLM | 100% / 100% | | | | | | | 0% | 0% | |
-| **holdout2 — chưa từng tinh chỉnh** | rules / LLM | **90% / 95%** | — | 95% / 100% | 100% / 100% | 100% / 100% | 83% / 83% | — | 0% | 0% | 0,41 / 1,0 s |
+### 10.1 v2.0 (customer-facing, read-only) — đo thật, Backend thật + Bedrock Gemma 3 4B
 
-Cách đọc trung thực: `cases` và `holdout` đã được dùng để sửa lỗi nên con số 100% là trên tập đã thấy. **`holdout2` là thước đo tổng quát hóa** (viết mới, chạy một lần, không sửa theo).
+| Bộ (số câu) | Chế độ | Task completion | Intent | Tool | Trung thực khi thiếu dữ liệu | Hallucination | Trái phép | LLM call / token vào | Truy vấn Backend | Latency TB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| cases (105) | rules | 100% | 100% | 100% | 100% | 0% | 0% | 0 / 0 | 1,11 | 195 ms |
+| cases (105) | LLM | 100% | 100% | 100% | 100% | 0% | 0% | 0,029 / 10,4 | 1,11 | 237 ms |
+| holdout (25) | rules / LLM | 100% / 100% | 100% | 100% | 100% | 0% | 0% | 0 · 0,08 / 28,8 | 1,56 | 246 / 394 ms |
+| holdout2 (20) | rules / LLM | 100% / 100% | 100% | 100% | 100% | 0% | 0% | 0 · 0,05 / 18,6 | 1,65 | 337 / 334 ms |
 
-### 10.1 Sau hardening (v1.2) — chi phí trước/sau (đo thật, Bedrock Gemma 3 4B + Backend thật)
+Đo ngày 2026-10-06 trên Backend thật (đã thức); `pytest` v2.1: 304 passed. E2E HTTP thật (uvicorn, request đúng hình dạng Backend,
+không user JWT): 13/13 (v2.1).
 
-| Chỉ số / request | Trước (v1.1, `cases`, LLM) | Sau (v1.2) `cases` | `holdout` | `holdout2` |
-|---|---|---|---|---|
-| Task completion (LLM / rules) | 99% | 100% / 100% | 100% / 100% | 100% / 100% |
-| Hallucination / hành động trái phép | 0% / 0% | 0% / 0% | 0% / 0% | 0% / 0% |
-| Lượt gọi LLM | 0,876 | **0,038** | 0,08 | 0,05 |
-| Token vào / ra | 627 / 26,9 | **13,9 / 1,1** | 29,6 / 2,4 | 19,1 / 1,5 |
-| Truy vấn Backend (DB) | 3,91 | **1,14** | 1,6 | 1,6 |
-| Tool call | 0,93 | 0,92 | 0,96 | 1,0 |
-| Latency TB | 3.305 ms | **191 ms** | 272 ms | 249 ms |
+`cases`/`holdout` đã được dùng để sửa lỗi; `holdout2` là thước đo tổng quát hóa (viết mới, gần như không sửa theo).
 
-Nguồn tiết kiệm: domain guard + luật tự tin trước LLM; prompt NLU rút gọn (~720 → ~370 token/lượt gọi), `maxTokens` 300 → 150;
-ngữ cảnh gửi LLM không lặp danh sách sản phẩm; tư vấn 1 truy vấn thay vì 2–3 tìm kiếm + 14 chi tiết; tra mã model đọc 1 chi tiết
-thay vì 5; cache danh mục/chất liệu (giá/tồn kho **không** cache). `holdout2` sau v1.2 chưa được dùng để sửa luật, trừ một lỗi
-được phát hiện khi chạy lại (tiếng Anh số nhiều "promotions").
+### 10.2 Lịch sử chi phí (`cases`, chế độ LLM)
+
+| Chỉ số / request | v1.1 (LLM-first) | v1.2 (hardened) | v2.0 |
+|---|---|---|---|
+| Lượt gọi LLM | 0,876 | 0,038 | 0,029 |
+| Token vào | 627 | 13,9 | 10,4 |
+| Truy vấn Backend | 3,91 | 1,14 | 1,11 |
+| Latency TB | 3.305 ms | 191 ms | 237 ms |
 
 ## 11. Hạn chế đã biết
 
-- Deterministic-first: câu bộ luật "tự tin" nhưng hiểu sai sẽ không được LLM sửa. Bộ đánh giá hiện không phát hiện trường hợp
-  nào, nhưng cần theo dõi bằng log `meta.intents` trên dữ liệu thật.
-- "từ 5 triệu" (không có "đến") chưa hiểu là giá tối thiểu vì sau khi bỏ dấu trùng với "tủ 5 triệu".
-- Tư vấn quét 1 trang 50 sản phẩm (catalog thật có 27); khi catalog lớn hơn cần Backend hỗ trợ lọc theo tên/danh mục cha.
-- Gemma 3 4B đôi khi gán nhầm intent ở câu hiếm; bộ dự phòng che phần lớn, nhưng câu tự do rất khác mẫu vẫn có thể bị hỏi lại.
-- Pending action, session, rate limit ở **bộ nhớ trong** ⇒ 1 instance. Audit JSONL trên đĩa Render là tạm thời.
-- Luồng ghi thật (PUT/PATCH/POST) chưa chạy với production (không có tài khoản test); request body theo OpenAPI snapshot.
-- Policy/FAQ/khuyến mãi/giờ mở cửa/tồn kho công khai phụ thuộc Backend (GAP).
+- FAQ Web/App, chính sách nhà cung cấp, giờ hoạt động, khuyến mãi: Backend/Supabase **chưa có nguồn** → agent chỉ nói chưa có.
+- Tồn kho công khai chưa có (chỉ supplier chủ xem được) và `store_inventory` đang rỗng → "chưa có dữ liệu tồn kho".
+- Tra một mã không tồn tại phải quét catalog (Backend chưa có API tra SKU).
+- Session/rate limit ở **bộ nhớ trong** ⇒ 1 instance; restart mất ngữ cảnh hội thoại (không còn action chờ xác nhận nên không mất thao tác).
+- Deterministic-first: câu bộ luật "tự tin" nhưng hiểu sai không được LLM sửa — theo dõi `meta.intents` trên log thật.
+- "từ 5 triệu" (không có "đến") chưa hiểu là giá tối thiểu (trùng "tủ 5 triệu" sau khi bỏ dấu).
+- `get_order_status`/xưởng gần/task 3D chỉ có dữ liệu khi Backend chuyển tiếp token của khách ở luồng `/api/ai-chat` (chưa xác minh).
+- Session không gắn danh tính người dùng (Agent không biết người dùng): `session_id` ngẫu nhiên do server tạo; Backend phải giữ
+  ánh xạ phiên ↔ người dùng và không lộ `session_id` của người này cho người khác.
+- `AGENT_SERVICE_API_KEY` mặc định tắt (tương thích Backend hiện tại); khi chưa bật, nên giới hạn mạng để chỉ Backend gọi được Agent.
 
-## 12. Thay đổi so với chatbot gốc
+## 12. Thay đổi lớn
 
-Đã xóa (revert được qua git): truy cập Supabase trực tiếp bằng secret key (`app/core/database.py`), pipeline if/else + classifier khớp chuỗi con, `business_engine` (tải toàn catalog, ghi giỏ hàng lỗi, công thức giá cứng), Meshy trực tiếp + giá 3D cứng, `/api/products` lộ draft, workshop mock, RAG FAISS chưa chạy + script sync lỗi, crawler website bên thứ ba, dead code (orchestrator/Groq/prompt cũ), LLM tool-use loop (Gemma không hỗ trợ), test script không assert. Giữ và tái sử dụng: bộ chuẩn hóa tiếng Việt (`app/nlp/vietnamese.py`).
+- **v2.1**: bỏ xác thực/phân quyền người dùng khỏi Agent (verify JWT, `/api/users/me`, role, 401/403, "cần đăng nhập");
+  token chuyển tiếp nguyên trạng; thêm khóa server-to-server tùy chọn.
+- **v2.0**: bỏ toàn bộ mutation (tool ghi, PendingAction/xác nhận, parser lệnh ghi, PUT/PATCH/POST trong allowlist), bỏ
+  `get_store_info`/`get_promotions`/`get_policy`; thêm `get_supplier_info`, `get_order_status`, gợi ý đa nhà cung cấp,
+  alias camelCase cho request, block `supplier_info`/`order_status`.
+- **v1.2**: domain guard, deterministic-first, chuẩn hóa giá, câu trả lời ngắn, advisor lọc chặt.
+- **v1.0** (so với chatbot gốc): bỏ truy cập Supabase trực tiếp bằng secret key, pipeline if/else, business_engine, Meshy trực
+  tiếp, RAG FAISS chưa chạy, crawler, dead code.

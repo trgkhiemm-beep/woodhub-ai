@@ -1,31 +1,25 @@
 """
-Integration ports (Hexagonal architecture).
+Integration ports (Hexagonal architecture) — CHỈ ĐỌC.
 
-Agent core và tools CHỈ phụ thuộc vào các Protocol dưới đây. Adapter production:
-app/adapters/backend/* → WoodHub Backend (source of truth, đọc/ghi Supabase phía Backend).
-Thay Backend (hoặc thêm nguồn mới) chỉ cần viết adapter mới cho các Protocol này.
+Agent core và tools chỉ phụ thuộc vào các Protocol dưới đây. Adapter production:
+app/adapters/backend/* → WoodHub Backend (source of truth, Backend đọc Supabase).
+Không có method ghi dữ liệu: Admin/Supplier cập nhật qua Backend Admin API, không qua agent.
 
-Quy ước: mọi method nhận `principal` để adapter gọi Backend bằng quyền của chính người dùng;
+Quy ước: mọi method nhận `principal` (ngữ cảnh người gọi) để adapter chuyển tiếp nguyên trạng token Backend gửi kèm;
+Backend tự quyết định quyền truy cập;
 lỗi phải được chuẩn hóa thành app.domain.errors.PortError.
 """
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from app.domain.models import (
-    Branch, DesignTask, InventoryInfo, KnowledgeDocument, KnowledgeHit, KnowledgeKind, NamedRef,
-    PolicyType, Product, ProductPage, Promotion, PromotionStatus, SearchCriteria, StoreInfo,
+    Branch, CustomOrder, DesignTask, InventoryInfo, KnowledgeHit, KnowledgeKind, NamedRef, Product, ProductPage,
+    SearchCriteria, SupplierInfo,
 )
 from app.domain.principal import Principal
 
 SourceSystem = Literal["backend"]
-
-
-@runtime_checkable
-class IdentityPort(Protocol):
-    source_system: SourceSystem
-
-    async def resolve(self, access_token: str) -> Principal: ...
 
 
 @runtime_checkable
@@ -39,11 +33,6 @@ class CatalogPort(Protocol):
     async def list_materials(self, principal: Principal) -> list[NamedRef]: ...
     async def list_rooms(self, principal: Principal) -> list[NamedRef]: ...
     async def list_styles(self, principal: Principal) -> list[NamedRef]: ...
-    # --- mutations (quyền do nguồn dữ liệu enforce lần 2) ---
-    async def update_product_description(self, product: Product, description: str, principal: Principal) -> Product: ...
-    async def update_variant_price(self, product: Product, variant_id: str, price: float, principal: Principal) -> Product: ...
-    async def upsert_category(self, category_id: str | None, name: str, parent_id: str | None, principal: Principal) -> NamedRef: ...
-    async def upsert_material(self, material_id: str | None, name: str, principal: Principal) -> NamedRef: ...
 
 
 @runtime_checkable
@@ -51,40 +40,34 @@ class InventoryPort(Protocol):
     source_system: SourceSystem
 
     async def get_inventory(self, variant_id: str, principal: Principal) -> InventoryInfo: ...
-    async def adjust_inventory(self, store_id: str, variant_id: str, delta: int, principal: Principal) -> InventoryInfo: ...
 
 
 @runtime_checkable
 class StorePort(Protocol):
+    """Nhà cung cấp và cửa hàng/chi nhánh của họ."""
     source_system: SourceSystem
 
-    async def get_store_info(self, principal: Principal) -> StoreInfo: ...
+    async def list_suppliers(self, principal: Principal) -> list[SupplierInfo]: ...
+    async def get_supplier(self, supplier_id: str, principal: Principal) -> SupplierInfo: ...
     async def list_branches(self, principal: Principal, city: str | None = None) -> list[Branch]: ...
     async def find_nearby_workshops(self, lat: float, lng: float, limit: int, principal: Principal) -> list[Branch]: ...
-    async def update_store_info(self, changes: dict[str, Any], expected_version: int | None, principal: Principal) -> StoreInfo: ...
 
 
 @runtime_checkable
-class PromotionPort(Protocol):
+class OrderPort(Protocol):
+    """Đơn của CHÍNH người dùng đăng nhập (Backend kiểm tra quyền sở hữu)."""
     source_system: SourceSystem
 
-    async def list_promotions(self, principal: Principal, status: PromotionStatus | None = None,
-                              category_id: str | None = None) -> list[Promotion]: ...
-    async def get_promotion(self, promotion_id: str, principal: Principal) -> Promotion: ...
-    async def create_promotion(self, draft: dict[str, Any], principal: Principal, idempotency_key: str) -> Promotion: ...
-    async def set_promotion_status(self, promotion_id: str, status: PromotionStatus, expected_version: int | None,
-                                   principal: Principal) -> Promotion: ...
+    async def list_my_orders(self, principal: Principal, limit: int = 5) -> list[CustomOrder]: ...
+    async def get_order(self, order_id: str, principal: Principal) -> CustomOrder: ...
 
 
 @runtime_checkable
 class KnowledgePort(Protocol):
+    """FAQ / hướng dẫn sử dụng Web/App (semantic knowledge, phải có nguồn thật)."""
     source_system: SourceSystem
 
-    async def get_policy(self, policy_type: PolicyType, principal: Principal) -> KnowledgeDocument: ...
     async def search(self, query: str, kinds: list[KnowledgeKind], top_k: int, principal: Principal) -> list[KnowledgeHit]: ...
-    async def get_document(self, document_id: str, principal: Principal) -> KnowledgeDocument: ...
-    async def upsert_faq(self, document_id: str | None, question: str, answer: str, expected_version: int | None,
-                         principal: Principal) -> KnowledgeDocument: ...
 
 
 @runtime_checkable
@@ -97,12 +80,11 @@ class DesignPort(Protocol):
 class Ports:
     """Tập hợp adapter được wiring khi khởi động (xem app/container.py)."""
 
-    def __init__(self, *, identity: IdentityPort, catalog: CatalogPort, inventory: InventoryPort,
-                 store: StorePort, promotions: PromotionPort, knowledge: KnowledgePort, design: DesignPort):
-        self.identity = identity
+    def __init__(self, *, catalog: CatalogPort, inventory: InventoryPort, store: StorePort,
+                 knowledge: KnowledgePort, design: DesignPort, orders: OrderPort):
         self.catalog = catalog
         self.inventory = inventory
         self.store = store
-        self.promotions = promotions
         self.knowledge = knowledge
         self.design = design
+        self.orders = orders

@@ -43,16 +43,6 @@
               }
             }
           },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Unprocessable Entity",
             "content": {
@@ -65,16 +55,6 @@
           },
           "429": {
             "description": "Too Many Requests",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service Unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -122,16 +102,6 @@
               }
             }
           },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Unprocessable Entity",
             "content": {
@@ -144,16 +114,6 @@
           },
           "429": {
             "description": "Too Many Requests",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service Unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -203,16 +163,6 @@
               }
             }
           },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Unprocessable Entity",
             "content": {
@@ -225,16 +175,6 @@
           },
           "429": {
             "description": "Too Many Requests",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service Unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -282,16 +222,6 @@
               }
             }
           },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Unprocessable Entity",
             "content": {
@@ -304,16 +234,6 @@
           },
           "429": {
             "description": "Too Many Requests",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service Unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -364,16 +284,6 @@
             },
             "description": "Unauthorized"
           },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
           "422": {
             "content": {
               "application/json": {
@@ -394,7 +304,7 @@
             },
             "description": "Too Many Requests"
           },
-          "503": {
+          "404": {
             "content": {
               "application/json": {
                 "schema": {
@@ -402,7 +312,7 @@
                 }
               }
             },
-            "description": "Service Unavailable"
+            "description": "Not Found"
           }
         }
       }
@@ -456,16 +366,6 @@
             },
             "description": "Unauthorized"
           },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
           "422": {
             "content": {
               "application/json": {
@@ -485,16 +385,6 @@
               }
             },
             "description": "Too Many Requests"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
           }
         }
       }
@@ -538,16 +428,6 @@
             },
             "description": "Unauthorized"
           },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
           "422": {
             "content": {
               "application/json": {
@@ -567,16 +447,6 @@
               }
             },
             "description": "Too Many Requests"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
           }
         }
       }
@@ -588,7 +458,7 @@
           "agent"
         ],
         "summary": "Capabilities",
-        "description": "Danh sách tool người gọi được dùng (để Frontend hiển thị gợi ý). Không chứa dữ liệu nhạy cảm.",
+        "description": "Danh sách chức năng (tool chỉ đọc) của trợ lý — giống nhau cho mọi người gọi. Không chứa dữ liệu nhạy cảm.",
         "operationId": "capabilities_v1_agent_capabilities_get",
         "parameters": [
           {
@@ -920,7 +790,9 @@
               "knowledge",
               "taxonomy",
               "design_task",
-              "candidates"
+              "candidates",
+              "supplier_info",
+              "order_status"
             ],
             "title": "Kind"
           },
@@ -933,7 +805,8 @@
           "kind",
           "data"
         ],
-        "title": "Block"
+        "title": "Block",
+        "description": "Dữ liệu có cấu trúc kèm câu trả lời. Hình dạng `data` theo `kind` — các kind mới có schema riêng:\n`supplier_info` → SupplierInfoBlockData, `order_status` → list[OrderStatusBlockData]."
       },
       "ChatRequest": {
         "properties": {
@@ -956,7 +829,10 @@
               }
             ],
             "title": "Session Id",
-            "description": "Bỏ trống để server tạo phiên mới."
+            "description": "Bỏ trống để server tạo phiên mới. Alias: `sessionId`.",
+            "x-aliases": [
+              "sessionId"
+            ]
           },
           "client_message_id": {
             "anyOf": [
@@ -969,7 +845,10 @@
               }
             ],
             "title": "Client Message Id",
-            "description": "Id phía client để chống gửi trùng."
+            "description": "Id phía client để chống gửi trùng. Alias: `clientMessageId`.",
+            "x-aliases": [
+              "clientMessageId"
+            ]
           },
           "location": {
             "anyOf": [
@@ -987,7 +866,8 @@
         "required": [
           "message"
         ],
-        "title": "ChatRequest"
+        "title": "ChatRequest",
+        "description": "Nhận cả snake_case và camelCase: `session_id`|`sessionId`, `client_message_id`|`clientMessageId`."
       },
       "ConfirmRequest": {
         "properties": {
@@ -995,7 +875,11 @@
             "type": "string",
             "maxLength": 12,
             "minLength": 4,
-            "title": "Confirmation Code"
+            "title": "Confirmation Code",
+            "description": "Alias: `confirmationCode`.",
+            "x-aliases": [
+              "confirmationCode"
+            ]
           },
           "session_id": {
             "anyOf": [
@@ -1007,14 +891,19 @@
                 "type": "null"
               }
             ],
-            "title": "Session Id"
+            "title": "Session Id",
+            "description": "Alias: `sessionId`.",
+            "x-aliases": [
+              "sessionId"
+            ]
           }
         },
         "type": "object",
         "required": [
           "confirmation_code"
         ],
-        "title": "ConfirmRequest"
+        "title": "ConfirmRequest",
+        "description": "Giữ cho tương thích Backend (/api/admin/ai-agent/actions/{id}/confirm). Agent CHỈ ĐỌC nên không còn action:\nluôn trả AgentResponse type=error, error.code=ACTION_NOT_FOUND. Nhận `confirmationCode`, `sessionId`."
       },
       "ConfirmationOut": {
         "properties": {
@@ -1267,7 +1156,9 @@
               "supplier",
               "admin"
             ],
-            "title": "Role"
+            "title": "Role",
+            "description": "Luôn 'customer': Agent không xác thực/phân quyền người dùng (Backend làm). Giữ cho tương thích.",
+            "default": "customer"
           },
           "planner": {
             "type": "string",
@@ -1303,7 +1194,6 @@
         "type": "object",
         "required": [
           "profile",
-          "role",
           "planner"
         ],
         "title": "MetaOut"
@@ -1410,6 +1300,356 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "SupplierStoreBlockData": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Name"
+          },
+          "district": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "District"
+          },
+          "city": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "City"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Kind"
+          },
+          "supplier_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Supplier Id"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "SupplierStoreBlockData",
+        "type": "object"
+      },
+      "SupplierInfoBlockData": {
+        "description": "Block `supplier_info`: hồ sơ CÔNG KHAI của nhà cung cấp (Backend /api/suppliers/{id}/public + /stores).",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "retailer | workshop",
+            "title": "Type"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Phone"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Email"
+          },
+          "stores": {
+            "description": "Chỉ quận/thành phố (Backend công khai).",
+            "items": {
+              "$ref": "#/components/schemas/SupplierStoreBlockData"
+            },
+            "title": "Stores",
+            "type": "array"
+          },
+          "product": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Tên sản phẩm dùng để xác định nhà cung cấp (nếu có).",
+            "title": "Product"
+          },
+          "fields": {
+            "description": "Trường khách hỏi; rỗng = mặc định điện thoại, email, khu vực.",
+            "items": {
+              "enum": [
+                "hotline",
+                "email",
+                "address",
+                "opening_hours"
+              ],
+              "type": "string"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "topic": {
+            "anyOf": [
+              {
+                "enum": [
+                  "shipping",
+                  "return",
+                  "warranty",
+                  "payment",
+                  "terms",
+                  "privacy"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Khách hỏi chính sách của nhà cung cấp; Backend chưa có dữ liệu chính sách.",
+            "title": "Topic"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "SupplierInfoBlockData",
+        "type": "object"
+      },
+      "OrderStatusChangeBlockData": {
+        "properties": {
+          "from_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "From Status"
+          },
+          "to_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "To Status"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Note"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Created At"
+          }
+        },
+        "title": "OrderStatusChangeBlockData",
+        "type": "object"
+      },
+      "OrderStatusBlockData": {
+        "description": "Phần tử của block `order_status` (data là danh sách): đơn đặt làm do Backend trả theo token Backend chuyển tiếp.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "order_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Order Number"
+          },
+          "status": {
+            "description": "Giá trị nguyên văn từ Backend (custom_orders.status).",
+            "title": "Status",
+            "type": "string"
+          },
+          "workshop_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Workshop Name"
+          },
+          "total_amount": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Total Amount"
+          },
+          "lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Lead Time Days"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Updated At"
+          },
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/OrderStatusChangeBlockData"
+            },
+            "title": "History",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "title": "OrderStatusBlockData",
+        "type": "object"
       }
     }
   }
