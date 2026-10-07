@@ -13,10 +13,10 @@ from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 from app.api.deps import get_container, rate_limited_caller, request_id
-from app.api.schemas import AgentResponse, Location
+from app.api.schemas import AgentResponse, real_location
 from app.container import Container
 from app.domain.principal import Principal
 from app.tools.base import AgentProfile
@@ -28,11 +28,21 @@ IMAGE_TO_3D_MESSAGE = ("Tính năng tạo mẫu 3D từ ảnh nay được xử 
 
 
 class LegacyChatRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=10000)
-    session_id: str = Field(min_length=1, max_length=100)
-    lat: float | None = Field(default=None, ge=-90, le=90)
-    lng: float | None = Field(default=None, ge=-180, le=180)
+    """Nhận thêm `content`/`message` (thay `query`), `sessionId`; lat/lng thiếu/không hợp lệ/giá trị mẫu → bỏ qua."""
+    query: str = Field(min_length=1, max_length=10000, validation_alias=AliasChoices("query", "content", "message"))
+    session_id: str | None = Field(default=None, min_length=1, max_length=100,
+                                   validation_alias=AliasChoices("session_id", "sessionId"))
+    lat: float | None = None
+    lng: float | None = None
     image_url: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_location(cls, data):
+        if isinstance(data, dict):
+            real = real_location(data.get("lat", data.get("latitude")), data.get("lng", data.get("longitude")))
+            data = {**data, "lat": real[0] if real else None, "lng": real[1] if real else None}
+        return data
 
 
 def _event(payload: dict) -> str:
@@ -73,9 +83,7 @@ async def legacy_chat(req: LegacyChatRequest, principal: Principal = Depends(rat
             yield _event({"type": "chunk", "content": IMAGE_TO_3D_MESSAGE})
             yield _event({"type": "done"})
         return StreamingResponse(only_message(), media_type="text/event-stream")
-    loc = (req.lat, req.lng) if req.lat is not None and req.lng is not None else None
-    if loc and not Location(lat=loc[0], lng=loc[1]).is_real:
-        loc = None  # giá trị mẫu Swagger (-90,-180) / (0,0): không phải GPS thật
+    loc = (req.lat, req.lng) if req.lat is not None and req.lng is not None else None  # đã chuẩn hóa: GPS thật hoặc None
     resp = await c.agent.handle_turn(message=req.query, principal=principal, profile=AgentProfile.CUSTOMER,
                                      request_id=rid, session_id=req.session_id, location=loc)
     return StreamingResponse(_legacy_stream(resp), media_type="text/event-stream",

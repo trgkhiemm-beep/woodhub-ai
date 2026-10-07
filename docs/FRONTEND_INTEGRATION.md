@@ -40,10 +40,10 @@
 
 | Field | Bắt buộc | Alias camelCase (Backend Spring) | Ghi chú |
 |---|---|---|---|
-| `message` | có | — | ≤ `MAX_MESSAGE_CHARS` (mặc định 2000) |
+| `message` | có | `content` (Backend `SendAiMessageRequest`), `query` | ≤ `MAX_MESSAGE_CHARS` (mặc định 2000) |
 | `session_id` | không | `sessionId` | bỏ trống lần đầu; gửi lại giá trị server trả về |
 | `client_message_id` | không | `clientMessageId` | chống gửi trùng |
-| `location` | không | `lat` + `lng` ở cấp ngoài (như Backend gửi) | chỉ dùng tìm xưởng gần; (-90,-180) và (0,0) bị coi là không có vị trí |
+| `lat`, `lng` | không | `latitude`, `longitude`/`lon`; hoặc `location{lat,lng}` | GPS thiết bị, chỉ dùng tìm xưởng gần. Thiếu một trong hai, không phải số, ngoài [-90,90]/[-180,180], (-90,-180), (0,0) → bỏ qua (không lỗi 422) |
 
 Confirm (`POST /v1/agent/actions/{id}/confirm`): `{"confirmation_code": "…", "session_id": "…"}` — nhận cả
 `confirmationCode`, `sessionId`. Alias được ghi trong OpenAPI ở `x-aliases`. **Response luôn snake_case.**
@@ -164,7 +164,7 @@ Lỗi trong hội thoại (Backend chậm/dữ liệu hỏng) trả HTTP 200 v�
 `UPSTREAM_UNAVAILABLE`, `MALFORMED_RESPONSE`, `ACTION_NOT_FOUND`…).
 
 ## 8. `/chat` cũ (deprecated)
-Request `{query, session_id, lat?, lng?, image_url?}` → SSE `data: {"type":"chunk","content"}` … `{"type":"debug_data","payload":[{id,name,description,price,status,image_url}]}` hoặc `mixed_data` … `{"type":"done"}`. `image_url` không còn tạo 3D (Backend `/api/custom/ai/generate` đảm nhiệm).
+Request `{query|content|message, session_id?|sessionId?, lat?, lng?, image_url?}` → SSE `data: {"type":"chunk","content"}` … `{"type":"debug_data","payload":[{id,name,description,price,status,image_url}]}` hoặc `mixed_data` … `{"type":"done"}`. `image_url` không còn tạo 3D (Backend `/api/custom/ai/generate` đảm nhiệm).
 
 ## 9. Việc của team Frontend / App
 - [ ] Gọi agent **qua Backend**; không đặt bất kỳ key/secret nào trong web/APK.

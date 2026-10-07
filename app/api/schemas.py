@@ -6,11 +6,14 @@ Không bao giờ trả class nội bộ (PendingAction, ToolResult...) trực ti
 """
 from __future__ import annotations
 
+import logging
+import math
 from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+logger = logging.getLogger("woodhub.api")  # không log nội dung tin nhắn
 CONTRACT_VERSION = "1.0"
 
 ResponseType = Literal["answer", "clarification", "confirmation_required", "action_result", "error"]
@@ -37,26 +40,69 @@ class Location(BaseModel):
         return not (abs(self.lat) >= 90 or abs(self.lng) >= 180 or (self.lat == 0 and self.lng == 0))
 
 
+def _coord(value: Any, limit: float) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) and -limit <= v <= limit else None
+
+
+def real_location(lat: Any, lng: Any) -> tuple[float, float] | None:
+    """GPS thật hoặc None. Thiếu một trong hai, không phải số, ngoài [-90,90]/[-180,180], giá trị mẫu (-90,-180)/(0,0)
+    → None: Agent không tự tạo hay đoán vị trí, và vị trí hỏng không làm hỏng cả lượt chat (vị trí là tùy chọn)."""
+    la, ln = _coord(lat, 90), _coord(lng, 180)
+    if la is None or ln is None or not Location(lat=la, lng=ln).is_real:
+        return None
+    return la, ln
+
+
+def _pick(data: dict, *keys: str) -> Any:
+    return next((data[k] for k in keys if data.get(k) is not None), None)
+
+
+_LAT_KEYS, _LNG_KEYS = ("lat", "latitude"), ("lng", "lon", "longitude")
+
+
 class ChatRequest(BaseModel):
     """Nhận cả snake_case và camelCase: `session_id`|`sessionId`, `client_message_id`|`clientMessageId`.
-    Vị trí: `location{lat,lng}` hoặc `lat`/`lng` ở cấp ngoài (Backend `AdminAiChatRequest{message, sessionId, lat, lng}`).
-    Vị trí không hợp lệ/giá trị mẫu (-90,-180), (0,0) bị bỏ qua — Agent không giả định vị trí."""
-    model_config = ConfigDict(json_schema_extra={"examples": [{"message": "tìm bàn học dưới 3 triệu", "session_id": None}]})
+    Nội dung: `message` hoặc `content` (Backend `SendAiMessageRequest{content, lat, lng}`) hoặc `query` (định dạng /chat cũ).
+    Vị trí: `lat`/`lng` ở cấp ngoài (Backend `SendAiMessageRequest`, `AdminAiChatRequest`) hoặc `location{lat,lng}`;
+    nhận thêm `latitude`/`longitude`. Vị trí thiếu/không hợp lệ/giá trị mẫu (-90,-180), (0,0) bị bỏ qua (không lỗi 422)
+    — Agent không giả định vị trí. Chỉ tìm xưởng gần cần vị trí."""
+    model_config = ConfigDict(json_schema_extra={"examples": [
+        {"content": "tìm xưởng gần tôi", "lat": 10.7769, "lng": 106.7009},
+        {"message": "tìm bàn học dưới 3 triệu", "session_id": None},
+    ]})
 
     @model_validator(mode="before")
     @classmethod
-    def _top_level_location(cls, data: Any) -> Any:
-        if isinstance(data, dict) and data.get("location") is None and data.get("lat") is not None and data.get("lng") is not None:
-            data = {**data, "location": {"lat": data["lat"], "lng": data["lng"]}}
-        return data
+    def _normalize_location(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        loc = data.get("location") if isinstance(data.get("location"), dict) else {}
+        lat, lng = _pick(loc, *_LAT_KEYS), _pick(loc, *_LNG_KEYS)
+        if lat is None or lng is None:
+            lat, lng = _pick(data, *_LAT_KEYS), _pick(data, *_LNG_KEYS)
+        real = real_location(lat, lng)
+        if real is None and (lat is not None or lng is not None):
+            logger.info("location_ignored lat=%r lng=%r", lat, lng)
+        # Spring có thể serialize trường rỗng thành null (vd "message": null cạnh "content") → bỏ để alias kế tiếp được dùng.
+        data = {k: v for k, v in data.items()
+                if k not in ("latitude", "lon", "longitude") and not (k in ("message", "content", "query") and v is None)}
+        return {**data, "lat": real[0] if real else None, "lng": real[1] if real else None,
+                "location": {"lat": real[0], "lng": real[1]} if real else None}
 
-    @model_validator(mode="after")
-    def _drop_fake_location(self) -> "ChatRequest":
-        if self.location is not None and not self.location.is_real:
-            self.location = None
-        return self
-
-    message: str = Field(min_length=1, max_length=10000, description="Tin nhắn người dùng (giới hạn thực tế theo MAX_MESSAGE_CHARS).")
+    message: str = Field(min_length=1, max_length=10000,
+                         description="Tin nhắn người dùng (giới hạn thực tế theo MAX_MESSAGE_CHARS). Alias: `content`, `query`.",
+                         validation_alias=AliasChoices("message", "content", "query"),
+                         json_schema_extra={"x-aliases": ["content", "query"]})
+    lat: float | None = Field(default=None, ge=-90, le=90, examples=[10.7769],
+                              description="Vĩ độ GPS thiết bị (tùy chọn). Alias: `latitude`.")
+    lng: float | None = Field(default=None, ge=-180, le=180, examples=[106.7009],
+                              description="Kinh độ GPS thiết bị (tùy chọn). Alias: `lon`, `longitude`.")
     session_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_\-:.]+$",
                                    description="Bỏ trống để server tạo phiên mới. Alias: `sessionId`.",
                                    **_accepts("session_id", "sessionId"))

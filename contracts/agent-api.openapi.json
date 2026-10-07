@@ -815,7 +815,45 @@
             "maxLength": 10000,
             "minLength": 1,
             "title": "Message",
-            "description": "Tin nhắn người dùng (giới hạn thực tế theo MAX_MESSAGE_CHARS)."
+            "description": "Tin nhắn người dùng (giới hạn thực tế theo MAX_MESSAGE_CHARS). Alias: `content`, `query`.",
+            "x-aliases": [
+              "content",
+              "query"
+            ]
+          },
+          "lat": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 90.0,
+                "minimum": -90.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lat",
+            "description": "Vĩ độ GPS thiết bị (tùy chọn). Alias: `latitude`.",
+            "examples": [
+              10.7769
+            ]
+          },
+          "lng": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 180.0,
+                "minimum": -180.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lng",
+            "description": "Kinh độ GPS thiết bị (tùy chọn). Alias: `lon`, `longitude`.",
+            "examples": [
+              106.7009
+            ]
           },
           "session_id": {
             "anyOf": [
@@ -867,8 +905,13 @@
           "message"
         ],
         "title": "ChatRequest",
-        "description": "Nhận cả snake_case và camelCase: `session_id`|`sessionId`, `client_message_id`|`clientMessageId`.\nVị trí: `location{lat,lng}` hoặc `lat`/`lng` ở cấp ngoài (Backend `AdminAiChatRequest{message, sessionId, lat, lng}`).\nVị trí không hợp lệ/giá trị mẫu (-90,-180), (0,0) bị bỏ qua — Agent không giả định vị trí.",
+        "description": "Nhận cả snake_case và camelCase: `session_id`|`sessionId`, `client_message_id`|`clientMessageId`.\nNội dung: `message` hoặc `content` (Backend `SendAiMessageRequest{content, lat, lng}`) hoặc `query` (định dạng /chat cũ).\nVị trí: `lat`/`lng` ở cấp ngoài (Backend `SendAiMessageRequest`, `AdminAiChatRequest`) hoặc `location{lat,lng}`;\nnhận thêm `latitude`/`longitude`. Vị trí thiếu/không hợp lệ/giá trị mẫu (-90,-180), (0,0) bị bỏ qua (không lỗi 422)\n— Agent không giả định vị trí. Chỉ tìm xưởng gần cần vị trí.",
         "examples": [
+          {
+            "content": "tìm xưởng gần tôi",
+            "lat": 10.7769,
+            "lng": 106.7009
+          },
           {
             "message": "tìm bàn học dưới 3 triệu"
           }
@@ -1066,17 +1109,22 @@
             "title": "Query"
           },
           "session_id": {
-            "type": "string",
-            "maxLength": 100,
-            "minLength": 1,
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Session Id"
           },
           "lat": {
             "anyOf": [
               {
-                "type": "number",
-                "maximum": 90.0,
-                "minimum": -90.0
+                "type": "number"
               },
               {
                 "type": "null"
@@ -1087,9 +1135,7 @@
           "lng": {
             "anyOf": [
               {
-                "type": "number",
-                "maximum": 180.0,
-                "minimum": -180.0
+                "type": "number"
               },
               {
                 "type": "null"
@@ -1111,10 +1157,10 @@
         },
         "type": "object",
         "required": [
-          "query",
-          "session_id"
+          "query"
         ],
-        "title": "LegacyChatRequest"
+        "title": "LegacyChatRequest",
+        "description": "Nhận thêm `content`/`message` (thay `query`), `sessionId`; lat/lng thiếu/không hợp lệ/giá trị mẫu → bỏ qua."
       },
       "Location": {
         "properties": {

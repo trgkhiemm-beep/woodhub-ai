@@ -34,7 +34,10 @@ dữ liệu riêng; Backend tự quyết định. **Không cần đặt `JWT_SEC
 gửi header `X-Agent-Api-Key: <giá trị>` mọi request tới Agent; thiếu/sai → 401 `SERVICE_UNAUTHORIZED`. Mặc định tắt để không
 phá tích hợp hiện tại. Bổ sung: chỉ cho Backend truy cập Agent ở tầng mạng (private network / allowlist IP).
 
-**Lưu ý vị trí:** gửi GPS thật của thiết bị; không gửi giá trị mặc định. (-90,-180) và (0,0) bị Agent coi là không có vị trí.
+**Payload Backend → Agent (v2.4):** mọi route chat (`/v1/agent/chat`, `/chat/stream`, `/manage/chat`, `/manage/chat/stream`, `/chat` cũ)
+nhận nguyên `SendAiMessageRequest{content, lat, lng}` lẫn `AdminAiChatRequest{message, sessionId, lat, lng}` — không cần đổi tên trường.
+**Lưu ý vị trí:** gửi GPS thật của thiết bị; không gửi giá trị mặc định. Thiếu lat hoặc lng, ngoài phạm vi, (-90,-180) và (0,0)
+bị Agent coi là không có vị trí (không trả 422). Chỉ "tìm xưởng gần" cần vị trí; tìm/so sánh sản phẩm, FAQ không cần.
 **Truy vết:** mọi request Agent → Backend có header `X-Request-Id` (= `request_id` của lượt chat) — Backend nên log header này để đối chiếu.
 **Rate limit:** Agent giới hạn theo IP client (mặc định 600/phút, `RATE_LIMIT_PER_MINUTE`); 429 của Agent có header
 `X-RateLimit-Layer: ai-agent`. Khi Backend trả 429 cho request GET của Agent, Agent không retry và trả `UPSTREAM_RATE_LIMITED`.
