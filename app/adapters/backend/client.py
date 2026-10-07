@@ -18,6 +18,7 @@ import httpx
 
 from app.domain import errors
 from app.domain.principal import Principal
+from app.request_context import current_request_id
 
 logger = logging.getLogger("woodhub.backend")
 
@@ -68,8 +69,9 @@ class BackendClient:
         token = principal.access_token if principal else None
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        if request_id:
-            headers["X-Request-Id"] = request_id
+        rid = request_id or current_request_id.get()
+        if rid:
+            headers["X-Request-Id"] = rid  # Backend log được request này theo request_id của Agent
         clean_params = {k: v for k, v in (params or {}).items() if v is not None}
 
         attempts = 1 + (self._max_retries if method in _RETRY_SAFE else 0)
@@ -88,11 +90,13 @@ class BackendClient:
                 last_exc = self._map_status(resp, method, path)
                 if not last_exc.retryable or isinstance(last_exc, errors.RateLimited):
                     if isinstance(last_exc, errors.RateLimited):
-                        logger.warning("rate_limited layer=backend %s %s", method, path)
+                        logger.warning("upstream_429 request_id=%s %s %s attempt=%d layer=%s retry_after=%s cf_ray=%s rndr_id=%s body=%r",
+                                       rid, method, path, attempt + 1, upstream_layer(resp), resp.headers.get("retry-after"),
+                                       resp.headers.get("cf-ray"), resp.headers.get("rndr-id"), resp.text[:200])
                     raise last_exc
             if attempt + 1 < attempts:
                 await asyncio.sleep(self._backoff_base * (2 ** attempt))
-        logger.warning("Backend call failed after %d attempt(s): %s %s (%s)", attempts, method, path,
+        logger.warning("Backend call failed after %d attempt(s): request_id=%s %s %s (%s)", attempts, rid, method, path,
                        last_exc.code if last_exc else "?")
         assert last_exc is not None
         raise last_exc
@@ -124,6 +128,20 @@ class BackendClient:
         if status == 429:
             return errors.RateLimited("Đã vượt giới hạn sử dụng.", detail=detail)
         return errors.UpstreamUnavailable("Backend đang gặp sự cố.", detail=detail)
+
+
+def upstream_layer(resp: httpx.Response) -> str:
+    """Tầng nào sinh ra response lỗi: Spring Boot trả JSON {timestamp,status,error,path}; Cloudflare trả trang lỗi
+    (thường kèm 'error code: 10xx'); Render edge trả text/HTML không phải JSON của ứng dụng."""
+    ctype = resp.headers.get("content-type", "")
+    body = resp.text[:500]
+    if "json" in ctype and '"timestamp"' in body and '"path"' in body:
+        return "backend-app"
+    if "cloudflare" in body.lower() or "error code: 10" in body.lower():
+        return "cloudflare"
+    if resp.headers.get("x-render-origin-server") or resp.headers.get("rndr-id"):
+        return "render-edge-or-app"
+    return "unknown"
 
 
 def require_dict(value: Any, what: str) -> dict[str, Any]:

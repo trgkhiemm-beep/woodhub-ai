@@ -14,4 +14,4 @@ BACKEND_DENIED = ("Hệ thống WoodHub chưa cho phép xem thông tin này. N�
 ACTIONS_DISABLED = "Trợ lý AI không còn tạo hay thực hiện thay đổi dữ liệu nên không có yêu cầu nào để xác nhận/hủy."
 
 # NO DATA → NO_INFO · API ERROR → API_ERROR · Backend 429 → UPSTREAM_BUSY (không đổi mọi lỗi thành 'không có dữ liệu').
-PRODUCT_TOOLS = frozenset({"get_product", "recommend_products", "compare_products", "get_inventory", "get_supplier_info"})
+PRODUCT_TOOLS = frozenset({"get_product", "recommend_products", "search_products", "compare_products", "get_inventory", "get_supplier_info"})

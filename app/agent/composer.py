@@ -171,7 +171,7 @@ def _compose_ok(r: ToolResult, out: Composed, asked: list[str]) -> None:
             phone = f" — {b['phone']}" if b.get("phone") else ""
             out.lines.append(f"- {b.get('name') or 'Cửa hàng'}: {loc or 'chưa có địa chỉ'}{dist}{phone}")
         out.blocks.append(Block(kind="workshop_list" if t == "find_nearby_workshops" else "branch_list", data=d))
-    elif t == "recommend_products":
+    elif t in ("recommend_products", "search_products"):
         show_supplier = d.get("distinct_suppliers") or d.get("requirements", {}).get("supplier")
         out.lines += [f"- {it['name']} — {vnd(it.get('price'))}"
                       + (f" ({it['supplier']})" if show_supplier and it.get("supplier") else "")

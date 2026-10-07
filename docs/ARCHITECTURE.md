@@ -109,17 +109,18 @@ trên dữ liệu thật → (chỉ khi cần số chỗ/kích thước/màu) đ
 
 | Câu | Intent | `recommend_products` | Kết quả |
 |---|---|---|---|
-| "tìm bàn dưới 3 triệu", "có bàn học nào không", "tìm ghế gỗ", "Cho tôi 3 bàn" | `product_search` | `mode=search`, `limit` = số khách nêu (mặc định 5) | đúng điều kiện, **giá tăng dần** |
-| "gợi ý bàn học phù hợp", "chọn giúp 3 mẫu", "bàn nào đáng mua", "bàn ăn 6 người dưới 10tr" | `recommend` | `mode=recommend`, `limit` mặc định 3 | xếp hạng theo nhu cầu (gần ngân sách, số chỗ…) |
+| "bàn dưới 3 củ", "tìm bàn dưới 3 triệu", "có bàn học nào không", "Cho tôi 3 bàn" | `product_search` | tool **`search_products`** (1 `GET /api/products`, lọc deterministic), `limit` = số khách nêu (mặc định 5) | đúng điều kiện, **giá tăng dần** |
+| "gợi ý bàn học phù hợp", "chọn giúp 3 mẫu", "bàn nào đáng mua", "bàn ăn 6 người dưới 10tr" | `recommend` | tool `recommend_products`, `limit` mặc định 3 | xếp hạng theo nhu cầu (gần ngân sách, số chỗ…) |
 
 Điều kiện parse deterministic: loại, giá min/max (kể cả "dưới 3m" = 3 triệu khi có tiền tố giá và không có từ kích thước),
 chất liệu, màu, số chỗ, kích thước, **nhà cung cấp** (tên thật), **còn hàng** (điều kiện: đọc tồn kho thật; hết hàng → loại;
 Backend không công khai → ghi "tồn kho: chưa có thông tin", không khẳng định còn hàng), **số lượng** ("3 bàn").
 
-## 6. Tools (11, tất cả chỉ đọc)
+## 6. Tools (12, tất cả chỉ đọc)
 
 | Tool | Loại | Quyền xem dữ liệu | Nguồn (Backend) |
 |---|---|---|---|
+| search_products | SEARCH | all | `GET /api/products` (+ `/api/products/{id}` chỉ khi điều kiện cần biến thể/còn hàng) |
 | recommend_products | SEARCH | all | `GET /api/products`, `/api/products/{id}` |
 | get_product | REALTIME | all | `GET /api/products/{id}` |
 | compare_products | READ | all | `GET /api/products/{id}` |
@@ -161,6 +162,11 @@ Registry từ chối khi khởi động mọi tool không phải READ/SEARCH/REA
 | **Agent** (HTTP 429 `RATE_LIMITED`) | vượt `RATE_LIMIT_PER_MINUTE` theo IP client | header `X-RateLimit-Layer: ai-agent`, `Retry-After: 30`; log `rate_limited layer=agent` |
 | Backend API → Agent (429) | Backend giới hạn tool của Agent | **không retry** (retry ngay chỉ làm nặng thêm); `error.code=UPSTREAM_RATE_LIMITED`; log `layer=backend` |
 | AWS Bedrock (throttling) | chỉ khi bộ luật không chắc và gọi LLM | không lộ cho khách: NLU chuyển sang bộ luật; log `layer=bedrock-throttled`; boto3 retry tối đa 2 |
+
+**Truy vết (v2.3):** mọi request Agent → Backend mang `X-Request-Id` = `request_id` của lượt; khi Backend trả 429 Agent log
+`upstream_429 request_id=… GET /api/… layer=backend-app|cloudflare|render-edge-or-app retry_after=… cf_ray=… rndr_id=… body=…`
+→ xác định được tầng nào sinh 429 từ chính log. Dữ liệu tham chiếu (danh mục/chất liệu/nhà cung cấp) dùng **single-flight +
+nhớ lỗi 15 s** (một lượt không gọi lại endpoint vừa lỗi); `search_products` không phụ thuộc cứng vào `/api/categories`.
 
 Root cause `RATE_LIMITED` khi test qua Backend (bản cũ): limiter của Agent **30 request/phút theo IP**; sau Backend mọi người dùng
 chung một IP → cả hệ thống chỉ được 30 tin/phút. v2.1+ mặc định 600/phút (cấu hình được). Tool sản phẩm

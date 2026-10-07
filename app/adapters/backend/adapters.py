@@ -29,6 +29,53 @@ def _num(value: Any) -> float | None:
         raise errors.MalformedResponse("Giá trị số từ Backend không hợp lệ.", detail=repr(value)) from exc
 
 
+FAILURE_TTL_SECONDS = 15.0  # nhớ lỗi ngắn hạn của dữ liệu tham chiếu: không dội lại Backend đang lỗi/đang giới hạn
+
+
+class _RefCache:
+    """Cache dữ liệu THAM CHIẾU (danh mục, chất liệu, nhà cung cấp — không phải giá/tồn kho) với:
+    - single-flight: nhiều lời gọi đồng thời cùng khóa → đúng 1 request tới Backend;
+    - nhớ lỗi ngắn hạn: request vừa lỗi (429/timeout/5xx) → các lời gọi trong FAILURE_TTL_SECONDS nhận lại lỗi đó
+      thay vì gọi Backend lần nữa (tránh khuếch đại request khi Backend đang quá tải)."""
+
+    def __init__(self, ttl: float):
+        self.ttl = ttl
+        self.hits = 0
+        self._items: dict[str, tuple[float, Any]] = {}
+        self._failures: dict[str, tuple[float, errors.PortError]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def clear(self) -> None:
+        self._items.clear()
+        self._failures.clear()
+
+    async def get(self, key: str, loader):
+        for _ in range(2):  # trước và sau khi chờ khóa
+            now = time.monotonic()
+            hit = self._items.get(key)
+            if hit and hit[0] > now:
+                self.hits += 1
+                return hit[1]
+            fail = self._failures.get(key)
+            if fail and fail[0] > now:
+                raise fail[1]
+            lock = self._locks.setdefault(key, asyncio.Lock())
+            if lock.locked():
+                async with lock:
+                    continue
+            async with lock:
+                try:
+                    value = await loader()
+                except errors.PortError as exc:
+                    self._failures[key] = (time.monotonic() + FAILURE_TTL_SECONDS, exc)
+                    raise
+                self._failures.pop(key, None)
+                if self.ttl:
+                    self._items[key] = (time.monotonic() + self.ttl, value)
+                return value
+        return await loader()
+
+
 def _product_from_dto(dto: dict[str, Any]) -> Product:
     dto = require_dict(dto, "sản phẩm")
     if not dto.get("id") or not dto.get("name"):
@@ -59,9 +106,7 @@ class BackendCatalogAdapter:
         # Chỉ mục SKU → product_id (KHÔNG chứa giá/tồn kho). Sản phẩm khớp luôn được đọc lại realtime.
         self._sku_ttl = sku_index_ttl_seconds
         self._sku_index: tuple[float, dict[str, str]] | None = None
-        self._taxonomy_ttl = taxonomy_ttl_seconds
-        self._taxonomy_cache: dict[str, tuple[float, list[NamedRef]]] = {}
-        self.cache_hits = 0
+        self._taxonomy = _RefCache(taxonomy_ttl_seconds)
 
     async def search_products(self, criteria: SearchCriteria, principal: Principal) -> ProductPage:
         params = {
@@ -128,18 +173,17 @@ class BackendCatalogAdapter:
         self._sku_index = (time.monotonic() + self._sku_ttl, index)
         return index
 
+    @property
+    def cache_hits(self) -> int:
+        return self._taxonomy.hits
+
     async def _named(self, path: str, principal: Principal) -> list[NamedRef]:
         # Danh mục/chất liệu/phòng/phong cách là dữ liệu tĩnh, công khai → cache TTL ngắn (giá/tồn kho KHÔNG cache).
-        hit = self._taxonomy_cache.get(path)
-        if hit and hit[0] > time.monotonic():
-            self.cache_hits += 1
-            return hit[1]
-        data = require_list(await self._client.request("GET", path, principal), path)
-        items = [NamedRef(id=str(x["id"]), name=x["name"], slug=x.get("slug"), parent_id=x.get("parentId"),
-                          updated_at=x.get("createdAt")) for x in data if isinstance(x, dict) and x.get("id")]
-        if self._taxonomy_ttl:
-            self._taxonomy_cache[path] = (time.monotonic() + self._taxonomy_ttl, items)
-        return items
+        async def load() -> list[NamedRef]:
+            data = require_list(await self._client.request("GET", path, principal), path)
+            return [NamedRef(id=str(x["id"]), name=x["name"], slug=x.get("slug"), parent_id=x.get("parentId"),
+                             updated_at=x.get("createdAt")) for x in data if isinstance(x, dict) and x.get("id")]
+        return await self._taxonomy.get(path, load)
 
     async def list_categories(self, principal: Principal) -> list[NamedRef]:
         return await self._named("/api/categories", principal)
@@ -181,8 +225,7 @@ class BackendStoreAdapter:
 
     def __init__(self, client: BackendClient, cache_seconds: int = 300):
         self._client = client
-        self._ttl = cache_seconds
-        self._suppliers: tuple[float, list[SupplierInfo]] | None = None
+        self._ref = _RefCache(cache_seconds)
 
     @staticmethod
     def _supplier(dto: dict[str, Any]) -> SupplierInfo:
@@ -193,13 +236,11 @@ class BackendStoreAdapter:
 
     async def list_suppliers(self, principal: Principal) -> list[SupplierInfo]:
         """Danh sách nhà cung cấp công khai (cache ngắn: dữ liệu hồ sơ, không phải giá/tồn kho)."""
-        if self._suppliers and self._suppliers[0] > time.monotonic():
-            return self._suppliers[1]
-        data = require_dict(await self._client.request("GET", "/api/suppliers/public", principal,
-                                                       params={"size": 50}), "nhà cung cấp")
-        items = [self._supplier(s) for s in require_list(data.get("content", []), "nhà cung cấp") if isinstance(s, dict)]
-        self._suppliers = (time.monotonic() + self._ttl, items)
-        return items
+        async def load() -> list[SupplierInfo]:
+            data = require_dict(await self._client.request("GET", "/api/suppliers/public", principal,
+                                                           params={"size": 50}), "nhà cung cấp")
+            return [self._supplier(s) for s in require_list(data.get("content", []), "nhà cung cấp") if isinstance(s, dict)]
+        return await self._ref.get("suppliers", load)
 
     async def get_supplier(self, supplier_id: str, principal: Principal) -> SupplierInfo:
         dto = require_dict(await self._client.request("GET", f"/api/suppliers/{supplier_id}/public", principal), "nhà cung cấp")

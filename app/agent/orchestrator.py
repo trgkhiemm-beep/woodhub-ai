@@ -27,6 +27,7 @@ from app.domain.messages import ACTIONS_DISABLED
 from app.domain.principal import Principal
 from app.domain.results import ToolResult, ToolStatus
 from app.nlu.engine import NLUEngine
+from app.request_context import current_request_id
 from app.nlu.schema import Intent, NLUResult
 from app.ports import Ports
 from app.tools.advisor import parse_dimensions
@@ -67,6 +68,7 @@ class AgentService:
                           session_id: str | None = None, location: tuple[float, float] | None = None,
                           trace: TurnTrace | None = None) -> AgentResponse:
         started = time.monotonic()
+        current_request_id.set(request_id)  # mọi call Backend trong lượt này mang X-Request-Id
         trace = trace or TurnTrace()
         session = self.sessions.get_or_create(session_id, principal)
         state: DialogueState = session.conversation
@@ -172,7 +174,7 @@ class AgentService:
             return
         if r.status != ToolStatus.OK or r.data is None:
             return
-        if r.tool == "recommend_products":
+        if r.tool in ("recommend_products", "search_products"):
             items = [ShownProduct(id=i["id"], name=i["name"], price=i.get("price"), area_cm2=i.get("area_cm2"),
                                   category=i.get("category")) for i in r.data["items"]]
             state.set_shown(items)

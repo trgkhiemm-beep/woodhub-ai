@@ -35,6 +35,7 @@ gửi header `X-Agent-Api-Key: <giá trị>` mọi request tới Agent; thiếu/
 phá tích hợp hiện tại. Bổ sung: chỉ cho Backend truy cập Agent ở tầng mạng (private network / allowlist IP).
 
 **Lưu ý vị trí:** gửi GPS thật của thiết bị; không gửi giá trị mặc định. (-90,-180) và (0,0) bị Agent coi là không có vị trí.
+**Truy vết:** mọi request Agent → Backend có header `X-Request-Id` (= `request_id` của lượt chat) — Backend nên log header này để đối chiếu.
 **Rate limit:** Agent giới hạn theo IP client (mặc định 600/phút, `RATE_LIMIT_PER_MINUTE`); 429 của Agent có header
 `X-RateLimit-Layer: ai-agent`. Khi Backend trả 429 cho request GET của Agent, Agent không retry và trả `UPSTREAM_RATE_LIMITED`.
 
@@ -42,7 +43,7 @@ phá tích hợp hiện tại. Bổ sung: chỉ cho Backend truy cập Agent ở
 
 | Năng lực agent | Endpoint Backend | Trạng thái |
 |---|---|---|
-| Tìm / gợi ý sản phẩm | `GET /api/products?keyword&categoryId&materialId&minPrice&maxPrice&page&size` | ĐÃ CÓ — Agent có thể dùng |
+| Tìm (`search_products`) / gợi ý (`recommend_products`) sản phẩm | `GET /api/products?categoryId&minPrice&maxPrice&page&size` | ĐÃ CÓ — Agent có thể dùng |
 | Chi tiết, giá, biến thể, nhà cung cấp của sản phẩm | `GET /api/products/{id}` (có `supplierId`, `supplierName`) | ĐÃ CÓ — Agent có thể dùng |
 | Danh mục / chất liệu / phòng / phong cách | `GET /api/categories|materials|rooms|styles` | ĐÃ CÓ — Agent có thể dùng |
 | Danh sách nhà cung cấp công khai | `GET /api/suppliers/public` | ĐÃ CÓ — Agent có thể dùng |

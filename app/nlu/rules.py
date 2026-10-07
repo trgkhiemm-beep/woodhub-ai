@@ -154,9 +154,9 @@ def classify_conf(folded: str, e: Entities, *, has_context: bool = False) -> tup
         return Intent.RECOMMEND, True
     if (e.reference or e.ordinal) and (re.search(_ASK_PRICE, t) or re.search(_ASK_DETAIL, t) or has_context):
         return Intent.PRODUCT_DETAIL, True
-    # TÌM KIẾM ("tìm bàn dưới 3tr", "có ghế gỗ không") ≠ TƯ VẤN ("gợi ý", "chọn giúp", "nên mua", số người, nhỏ gọn…)
-    if re.search(_ASK_RECOMMEND, t) or e.seats or e.size or e.use_case or e.price_pref or (
-            e.category and (e.budget_max or e.budget_min) and not re.search(_ASK_SEARCH, t)):
+    # TÌM KIẾM ("bàn dưới 3 củ", "tìm bàn dưới 3tr", "có ghế gỗ không") = lọc deterministic, liệt kê theo giá.
+    # TƯ VẤN chỉ khi có tín hiệu cần xếp hạng theo nhu cầu ("gợi ý", "chọn giúp", "nên mua", số người, nhỏ gọn, mục đích…).
+    if re.search(_ASK_RECOMMEND, t) or e.seats or e.size or e.use_case or e.price_pref:
         return Intent.RECOMMEND, bool(e.category or e.seats or e.size or e.price_pref or e.use_case)
     if e.category or e.material or e.budget_max or e.budget_min or e.room or e.style:
         return Intent.PRODUCT_SEARCH, bool(e.category or e.material)

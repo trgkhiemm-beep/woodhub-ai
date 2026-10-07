@@ -7,6 +7,7 @@ import re
 from pydantic import Field, model_validator
 
 from app.domain import errors
+from app.request_context import current_request_id
 from app.domain.messages import BACKEND_DENIED, NO_INFO, PRODUCT_API_ERROR, PRODUCT_TOOLS, SYSTEM_ERROR, UPSTREAM_BUSY
 from app.domain.models import Product, SearchCriteria, Variant
 from app.domain.results import ToolResult, ToolStatus
@@ -20,7 +21,8 @@ SKU_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_\-]{1,49}$"
 
 def error_result(tool: str, exc: errors.PortError) -> ToolResult:
     """Không lộ chi tiết kỹ thuật cho người dùng; chi tiết chỉ vào log."""
-    logger.warning("tool=%s port_error=%s detail=%s", tool, exc.code, (exc.detail or "")[:300])
+    logger.warning("tool=%s port_error=%s request_id=%s detail=%s", tool, exc.code, current_request_id.get(),
+                   (exc.detail or "")[:300])
     product = tool in PRODUCT_TOOLS
     if isinstance(exc, errors.NotFound):
         return ToolResult(tool=tool, status=ToolStatus.NOT_FOUND, message=NO_INFO if product else exc.message,
@@ -31,7 +33,7 @@ def error_result(tool: str, exc: errors.PortError) -> ToolResult:
         # Backend từ chối (token hết hạn/không đủ quyền): câu dễ hiểu cho khách, chi tiết chỉ nằm trong log
         return ToolResult(tool=tool, status=ToolStatus.DENIED, message=BACKEND_DENIED, error_code=exc.code)
     if isinstance(exc, errors.RateLimited):
-        logger.warning("rate_limited layer=backend tool=%s", tool)
+        logger.warning("rate_limited layer=backend tool=%s request_id=%s", tool, current_request_id.get())
         return ToolResult(tool=tool, status=ToolStatus.ERROR, message=UPSTREAM_BUSY, error_code="UPSTREAM_RATE_LIMITED")
     if isinstance(exc, (errors.ValidationFailed, errors.Conflict)):
         return ToolResult(tool=tool, status=ToolStatus.INVALID, message=exc.message, error_code=exc.code)

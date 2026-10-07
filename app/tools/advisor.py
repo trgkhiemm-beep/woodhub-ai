@@ -9,6 +9,7 @@ Product Advisor: nhu cầu → catalog THẬT → ràng buộc CỨNG → xếp 
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Literal
@@ -24,6 +25,7 @@ from app.tools.base import OperationType, ToolContext, ToolInput, ToolSpec
 from app.tools.common import error_result
 from app.tools.read_tools import match_named
 
+logger = logging.getLogger("woodhub.tools.advisor")
 MAX_SCAN = 50      # một trang danh sách (catalog thật hiện có 27 sản phẩm)
 MAX_DETAILS = 8    # số chi tiết tối đa khi tiêu chí cần dữ liệu biến thể
 # Loại sản phẩm thường dùng cho từng phòng (Backend chưa gắn sản phẩm ↔ phòng: product_rooms rỗng).
@@ -143,7 +145,12 @@ async def _collect(args: RecommendInput, ctx: ToolContext) -> list[ProductSummar
     catalog = ctx.ports.catalog
     criteria = SearchCriteria(min_price=args.budget_min, max_price=args.budget_max, size=MAX_SCAN)
     if args.category:
-        cats = await catalog.list_categories(ctx.principal)
+        try:
+            cats = await catalog.list_categories(ctx.principal)
+        except (errors.RateLimited, errors.UpstreamUnavailable, errors.MalformedResponse) as exc:
+            # categoryId chỉ để thu hẹp truy vấn; _matches vẫn lọc đúng loại theo dữ liệu thật → không cần gọi lại.
+            logger.warning("list_categories unavailable (%s) → search without categoryId", exc.code)
+            cats = []
         cat_ref = match_named(cats, args.category) or match_named(cats, args.category.split()[0])
         # Danh mục lá → lọc phía Backend. Danh mục cha/không khớp → quét trang theo giá rồi lọc tên tại chỗ
         # (keyword của Backend cần đúng dấu và đúng cụm liền nhau nên dễ bỏ sót).
@@ -301,7 +308,23 @@ async def recommend_products(args: RecommendInput, ctx: ToolContext) -> ToolResu
                                           record_id=c.summary.id) for c in top])
 
 
+class SearchInput(RecommendInput):
+    """Tìm kiếm/lọc catalog thật: loại, giá min/max, chất liệu, nhà cung cấp, còn hàng… — liệt kê theo giá tăng dần."""
+    mode: Literal["search"] = "search"
+    limit: int = Field(default=5, ge=1, le=5)
+
+
+async def search_products(args: SearchInput, ctx: ToolContext) -> ToolResult:
+    """product_search: 1 truy vấn GET /api/products (lọc giá phía Backend) + lọc cứng tại chỗ. Không LLM, không gọi
+    dịch vụ khác; chỉ đọc chi tiết khi điều kiện cần biến thể (số chỗ/kích thước/màu) hoặc khi hỏi còn hàng."""
+    result = await recommend_products(args, ctx)
+    return result.model_copy(update={"tool": "search_products"})
+
+
 ADVISOR_TOOLS = [
+    ToolSpec("search_products",
+             "Tìm/lọc sản phẩm trên catalog thật theo loại, giá, chất liệu, nhà cung cấp, còn hàng (giá tăng dần).",
+             SearchInput, OperationType.SEARCH, "low", "Backend GET /api/products", read_handler=search_products),
     ToolSpec("recommend_products",
              "Tư vấn/tìm sản phẩm theo nhu cầu: loại, ngân sách (VND), số người, kích thước, chất liệu, màu, phòng, phong cách. "
              "Lọc chặt trên catalog thật.",

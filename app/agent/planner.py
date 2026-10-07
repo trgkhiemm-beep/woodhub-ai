@@ -167,8 +167,7 @@ class Planner:
                 return Step("tool", tool="get_product", args={"name": e.product_name})
             return Step("clarify", message=CATEGORY_QUESTION)
         state.constraints = state.merge_constraints(c)
-        return Step("tool", tool="recommend_products", args={**_recommend_args(state.constraints), "mode": "search",
-                                                             **_filters(e, 5)})
+        return Step("tool", tool="search_products", args={**_recommend_args(state.constraints), **_filters(e, 5)})
 
     def _recommend(self, e: Entities, state: DialogueState, continuation: bool = False) -> Step:
         new = {k: getattr(e, k) for k in ("category", "material", "color", "style", "room", "use_case",

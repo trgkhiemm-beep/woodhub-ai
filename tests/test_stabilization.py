@@ -42,7 +42,7 @@ def nlu(msg, ctx=False):
     ("tìm bàn dưới 3 triệu", Intent.PRODUCT_SEARCH), ("tim ban hoc duoi 3 trieu", Intent.PRODUCT_SEARCH),
     ("có bàn học nào không?", Intent.PRODUCT_SEARCH), ("tìm ghế gỗ", Intent.PRODUCT_SEARCH),
     ("gợi ý cho tôi bàn học phù hợp", Intent.RECOMMEND), ("chọn giúp tôi 3 mẫu bàn", Intent.RECOMMEND),
-    ("Cho tôi 3 bàn học dưới 3 triệu.", Intent.RECOMMEND), ("bàn nào đáng mua?", Intent.RECOMMEND),
+    ("Cho tôi 3 bàn học dưới 3 triệu.", Intent.PRODUCT_SEARCH), ("bàn dưới 3 củ", Intent.PRODUCT_SEARCH), ("bàn nào đáng mua?", Intent.RECOMMEND),
     ("tìm bàn dưới 3tr còn hàng của Nội Thất An Phát", Intent.PRODUCT_SEARCH),
     ("Shop của bàn TB06 ở đâu?", Intent.SUPPLIER_INFO), ("KTV01 còn hàng không", Intent.INVENTORY),
     ("tủ 2 cánh", Intent.PRODUCT_SEARCH),
