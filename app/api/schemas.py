@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 CONTRACT_VERSION = "1.0"
 
@@ -28,12 +28,34 @@ def _accepts(name: str, camel: str) -> dict[str, Any]:
 
 
 class Location(BaseModel):
-    lat: float = Field(ge=-90, le=90)
-    lng: float = Field(ge=-180, le=180)
+    lat: float = Field(ge=-90, le=90, examples=[10.7769])
+    lng: float = Field(ge=-180, le=180, examples=[106.7009])
+
+    @property
+    def is_real(self) -> bool:
+        """(-90,-180) là giá trị mẫu Swagger sinh từ minimum của schema, (0,0) là mặc định của client — không phải GPS thật."""
+        return not (abs(self.lat) >= 90 or abs(self.lng) >= 180 or (self.lat == 0 and self.lng == 0))
 
 
 class ChatRequest(BaseModel):
-    """Nhận cả snake_case và camelCase: `session_id`|`sessionId`, `client_message_id`|`clientMessageId`."""
+    """Nhận cả snake_case và camelCase: `session_id`|`sessionId`, `client_message_id`|`clientMessageId`.
+    Vị trí: `location{lat,lng}` hoặc `lat`/`lng` ở cấp ngoài (Backend `AdminAiChatRequest{message, sessionId, lat, lng}`).
+    Vị trí không hợp lệ/giá trị mẫu (-90,-180), (0,0) bị bỏ qua — Agent không giả định vị trí."""
+    model_config = ConfigDict(json_schema_extra={"examples": [{"message": "tìm bàn học dưới 3 triệu", "session_id": None}]})
+
+    @model_validator(mode="before")
+    @classmethod
+    def _top_level_location(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("location") is None and data.get("lat") is not None and data.get("lng") is not None:
+            data = {**data, "location": {"lat": data["lat"], "lng": data["lng"]}}
+        return data
+
+    @model_validator(mode="after")
+    def _drop_fake_location(self) -> "ChatRequest":
+        if self.location is not None and not self.location.is_real:
+            self.location = None
+        return self
+
     message: str = Field(min_length=1, max_length=10000, description="Tin nhắn người dùng (giới hạn thực tế theo MAX_MESSAGE_CHARS).")
     session_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_\-:.]+$",
                                    description="Bỏ trống để server tạo phiên mới. Alias: `sessionId`.",

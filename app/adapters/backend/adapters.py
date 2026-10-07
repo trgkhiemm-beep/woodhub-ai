@@ -52,9 +52,13 @@ def _product_from_dto(dto: dict[str, Any]) -> Product:
 class BackendCatalogAdapter:
     source_system = "backend"
 
-    def __init__(self, client: BackendClient, sku_scan_max_products: int = 40, taxonomy_ttl_seconds: int = 600):
+    def __init__(self, client: BackendClient, sku_scan_max_products: int = 40, taxonomy_ttl_seconds: int = 600,
+                 sku_index_ttl_seconds: int = 300):
         self._client = client
         self._sku_scan_max = sku_scan_max_products
+        # Chỉ mục SKU → product_id (KHÔNG chứa giá/tồn kho). Sản phẩm khớp luôn được đọc lại realtime.
+        self._sku_ttl = sku_index_ttl_seconds
+        self._sku_index: tuple[float, dict[str, str]] | None = None
         self._taxonomy_ttl = taxonomy_ttl_seconds
         self._taxonomy_cache: dict[str, tuple[float, list[NamedRef]]] = {}
         self.cache_hits = 0
@@ -82,17 +86,30 @@ class BackendCatalogAdapter:
         return _product_from_dto(await self._client.request("GET", f"/api/products/{product_id}", principal))
 
     async def find_product_by_sku(self, sku: str, principal: Principal) -> Product:
-        """Backend chưa có tra cứu theo SKU (GAP B.2) → tìm theo keyword rồi quét có giới hạn."""
-        seen: set[str] = set()
-        candidates: list[str] = []
-        first = await self.search_products(SearchCriteria(keyword=sku, size=5), principal)
-        candidates += [p.id for p in first.items]
+        """Backend chưa có tra cứu theo SKU (GAP) → dùng chỉ mục SKU→product_id dựng từ catalog (cache ngắn),
+        rồi đọc lại sản phẩm khớp REALTIME. Mã không tồn tại → NotFound mà không quét lại catalog mỗi lượt."""
+        index = await self._sku_map(principal)
+        pid = index.get(sku.strip().upper())
+        if pid:
+            try:
+                product = await self.get_product(pid, principal)
+                if product.variant_by_sku(sku):
+                    return product
+            except errors.NotFound:
+                pass
+            self._sku_index = None  # dữ liệu đã đổi → dựng lại lần sau
+        raise errors.NotFound(f"Không tìm thấy sản phẩm có mã {sku}.")
+
+    async def _sku_map(self, principal: Principal) -> dict[str, str]:
+        if self._sku_index and self._sku_index[0] > time.monotonic():
+            return self._sku_index[1]
+        ids: list[str] = []
         page = 0
-        while len(candidates) < self._sku_scan_max:
-            batch = await self.search_products(SearchCriteria(page=page, size=20), principal)
-            candidates += [p.id for p in batch.items]
+        while len(ids) < self._sku_scan_max:
+            batch = await self.search_products(SearchCriteria(page=page, size=50), principal)
+            ids += [p.id for p in batch.items]
             page += 1
-            if (page * 20) >= batch.total or not batch.items:
+            if (page * 50) >= batch.total or not batch.items:
                 break
         sem = asyncio.Semaphore(5)
 
@@ -103,11 +120,13 @@ class BackendCatalogAdapter:
                 except errors.NotFound:
                     return None
 
-        ordered = [pid for pid in candidates if not (pid in seen or seen.add(pid))][: self._sku_scan_max]
-        for product in await asyncio.gather(*(load(pid) for pid in ordered)):
-            if product and product.variant_by_sku(sku):
-                return product
-        raise errors.NotFound(f"Không tìm thấy sản phẩm có mã {sku}.")
+        index: dict[str, str] = {}
+        for product in await asyncio.gather(*(load(pid) for pid in dict.fromkeys(ids[: self._sku_scan_max]))):
+            for v in (product.variants if product else []):
+                if v.sku:
+                    index.setdefault(v.sku.strip().upper(), product.id)
+        self._sku_index = (time.monotonic() + self._sku_ttl, index)
+        return index
 
     async def _named(self, path: str, principal: Principal) -> list[NamedRef]:
         # Danh mục/chất liệu/phòng/phong cách là dữ liệu tĩnh, công khai → cache TTL ngắn (giá/tồn kho KHÔNG cache).

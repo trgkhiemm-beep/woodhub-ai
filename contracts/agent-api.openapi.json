@@ -867,7 +867,12 @@
           "message"
         ],
         "title": "ChatRequest",
-        "description": "Nhận cả snake_case và camelCase: `session_id`|`sessionId`, `client_message_id`|`clientMessageId`."
+        "description": "Nhận cả snake_case và camelCase: `session_id`|`sessionId`, `client_message_id`|`clientMessageId`.\nVị trí: `location{lat,lng}` hoặc `lat`/`lng` ở cấp ngoài (Backend `AdminAiChatRequest{message, sessionId, lat, lng}`).\nVị trí không hợp lệ/giá trị mẫu (-90,-180), (0,0) bị bỏ qua — Agent không giả định vị trí.",
+        "examples": [
+          {
+            "message": "tìm bàn học dưới 3 triệu"
+          }
+        ]
       },
       "ConfirmRequest": {
         "properties": {
@@ -1117,13 +1122,19 @@
             "type": "number",
             "maximum": 90.0,
             "minimum": -90.0,
-            "title": "Lat"
+            "title": "Lat",
+            "examples": [
+              10.7769
+            ]
           },
           "lng": {
             "type": "number",
             "maximum": 180.0,
             "minimum": -180.0,
-            "title": "Lng"
+            "title": "Lng",
+            "examples": [
+              106.7009
+            ]
           }
         },
         "type": "object",

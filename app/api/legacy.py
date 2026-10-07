@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_container, rate_limited_caller, request_id
-from app.api.schemas import AgentResponse
+from app.api.schemas import AgentResponse, Location
 from app.container import Container
 from app.domain.principal import Principal
 from app.tools.base import AgentProfile
@@ -74,6 +74,8 @@ async def legacy_chat(req: LegacyChatRequest, principal: Principal = Depends(rat
             yield _event({"type": "done"})
         return StreamingResponse(only_message(), media_type="text/event-stream")
     loc = (req.lat, req.lng) if req.lat is not None and req.lng is not None else None
+    if loc and not Location(lat=loc[0], lng=loc[1]).is_real:
+        loc = None  # giá trị mẫu Swagger (-90,-180) / (0,0): không phải GPS thật
     resp = await c.agent.handle_turn(message=req.query, principal=principal, profile=AgentProfile.CUSTOMER,
                                      request_id=rid, session_id=req.session_id, location=loc)
     return StreamingResponse(_legacy_stream(resp), media_type="text/event-stream",

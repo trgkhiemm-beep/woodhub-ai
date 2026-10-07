@@ -70,8 +70,16 @@ def _supplier_ref(e: Entities, state: DialogueState) -> dict[str, Any]:
     return {"product_id": cur.id} if cur else {}
 
 
-def _diversity(e: Entities) -> dict[str, Any]:
-    return {"distinct_suppliers": True} if e.distinct_suppliers else {}
+def _filters(e: Entities, default_limit: int) -> dict[str, Any]:
+    """Điều kiện thêm cho tìm/tư vấn: số lượng muốn xem, nhà cung cấp, còn hàng, khác nhà cung cấp."""
+    out: dict[str, Any] = {"limit": min(e.count or default_limit, 5)}
+    if e.distinct_suppliers:
+        out["distinct_suppliers"] = True
+    if e.supplier_name and not e.supplier_ref:
+        out["supplier"] = e.supplier_name
+    if e.in_stock:
+        out["in_stock"] = True
+    return out
 
 
 def _recommend_args(c: dict[str, Any]) -> dict[str, Any]:
@@ -154,13 +162,13 @@ class Planner:
                                          "budget_min", "budget_max", "seats", "size", "price_pref")}
         if c["budget_max"] is None and c["budget_min"] is None and e.amounts and c["category"]:
             c["budget_max"] = e.amounts[0]  # "bàn làm việc 2tr5" = ngân sách tối đa
-        if not any(v not in (None, "") for v in c.values()):
+        if not any(v not in (None, "") for v in c.values()) and not e.supplier_name:
             if e.product_name:  # món không thuộc danh mục đã biết → tra theo tên, không đoán
                 return Step("tool", tool="get_product", args={"name": e.product_name})
             return Step("clarify", message=CATEGORY_QUESTION)
         state.constraints = state.merge_constraints(c)
-        return Step("tool", tool="recommend_products", args={**_recommend_args(state.constraints), "mode": "search", "limit": 5,
-                                                             **_diversity(e)})
+        return Step("tool", tool="recommend_products", args={**_recommend_args(state.constraints), "mode": "search",
+                                                             **_filters(e, 5)})
 
     def _recommend(self, e: Entities, state: DialogueState, continuation: bool = False) -> Step:
         new = {k: getattr(e, k) for k in ("category", "material", "color", "style", "room", "use_case",
@@ -191,14 +199,15 @@ class Planner:
             return Step("clarify", message=CATEGORY_QUESTION)
         detail_keys = set(constraints) - {"category"}
         key = f"recommend:{constraints['category']}"
-        if not detail_keys and key not in state.asked:
+        if not detail_keys and key not in state.asked and not e.count:  # "chọn giúp 3 mẫu" → chọn luôn, không hỏi lại
             state.asked.add(key)
             state.pending, state.constraints = "recommend", constraints
             extra = "số người dùng" if "bàn ăn" in constraints["category"] else "kích thước/không gian đặt"
             return Step("clarify", message=f"Ngân sách khoảng bao nhiêu và {extra} thế nào?")
         state.pending = None
         state.constraints = constraints
-        return Step("tool", tool="recommend_products", args={**_recommend_args(constraints), "mode": "recommend", **_diversity(e)})
+        return Step("tool", tool="recommend_products", args={**_recommend_args(constraints), "mode": "recommend",
+                                                             **_filters(e, 3)})
 
     @staticmethod
     def relative_step(relative: str, ref: ShownProduct, constraints: dict[str, Any], state: DialogueState) -> Step:

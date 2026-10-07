@@ -28,7 +28,10 @@ Mở `http://localhost:8000/docs`. Ví dụ `POST /v1/agent/chat`:
 
 | Tin nhắn | Agent trả lời |
 |---|---|
-| `Tìm 3 bàn học dưới 2tr5` | `- Tên — giá` các bàn học ≤ 2.500.000đ trên catalog thật (lọc chặt) |
+| `tìm bàn dưới 3 triệu` | tìm kiếm: `- Tên — giá` các bàn ≤ 3.000.000đ trên catalog thật, giá tăng dần (≤5) |
+| `Tìm 3 bàn học dưới 2tr5` | đúng các bàn học ≤ 2.500.000đ (tối đa 3) |
+| `tìm bàn dưới 3tr còn hàng của <nhà cung cấp>` | lọc theo nhà cung cấp + kiểm tra tồn kho thật (chưa công khai → ghi rõ) |
+| `So sánh KTV01 và TB06` | bảng: giá, kích thước, chất liệu, tồn kho, nhà cung cấp |
 | `mk can ban an 6 ng tam 10 cu` | bàn ăn đủ 6 chỗ ≤ 10 triệu |
 | `Giá KTV01` → `Shop này ở đâu?` | giá thật, rồi tên/điện thoại/khu vực của **nhà cung cấp** sản phẩm đó |
 | `Cho tôi 3 bàn dưới 5 triệu từ các nhà cung cấp khác nhau` | mỗi nhà cung cấp tối đa 1 mẫu, kèm tên nhà cung cấp |

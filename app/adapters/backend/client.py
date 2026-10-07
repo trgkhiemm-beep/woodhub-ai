@@ -86,7 +86,9 @@ class BackendClient:
                 if resp.status_code < 400:
                     return self._parse_json(resp, method, path)
                 last_exc = self._map_status(resp, method, path)
-                if not last_exc.retryable:
+                if not last_exc.retryable or isinstance(last_exc, errors.RateLimited):
+                    if isinstance(last_exc, errors.RateLimited):
+                        logger.warning("rate_limited layer=backend %s %s", method, path)
                     raise last_exc
             if attempt + 1 < attempts:
                 await asyncio.sleep(self._backoff_base * (2 ** attempt))

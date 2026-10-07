@@ -7,7 +7,7 @@ import re
 from pydantic import Field, model_validator
 
 from app.domain import errors
-from app.domain.messages import BACKEND_DENIED, NO_INFO, PRODUCT_API_ERROR, PRODUCT_TOOLS, SYSTEM_ERROR
+from app.domain.messages import BACKEND_DENIED, NO_INFO, PRODUCT_API_ERROR, PRODUCT_TOOLS, SYSTEM_ERROR, UPSTREAM_BUSY
 from app.domain.models import Product, SearchCriteria, Variant
 from app.domain.results import ToolResult, ToolStatus
 from app.nlp.vietnamese import restore_diacritics_for_search
@@ -30,6 +30,9 @@ def error_result(tool: str, exc: errors.PortError) -> ToolResult:
     if isinstance(exc, (errors.Forbidden, errors.Unauthenticated)):
         # Backend từ chối (token hết hạn/không đủ quyền): câu dễ hiểu cho khách, chi tiết chỉ nằm trong log
         return ToolResult(tool=tool, status=ToolStatus.DENIED, message=BACKEND_DENIED, error_code=exc.code)
+    if isinstance(exc, errors.RateLimited):
+        logger.warning("rate_limited layer=backend tool=%s", tool)
+        return ToolResult(tool=tool, status=ToolStatus.ERROR, message=UPSTREAM_BUSY, error_code="UPSTREAM_RATE_LIMITED")
     if isinstance(exc, (errors.ValidationFailed, errors.Conflict)):
         return ToolResult(tool=tool, status=ToolStatus.INVALID, message=exc.message, error_code=exc.code)
     return ToolResult(tool=tool, status=ToolStatus.ERROR, message=PRODUCT_API_ERROR if product else SYSTEM_ERROR,

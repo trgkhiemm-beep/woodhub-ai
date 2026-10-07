@@ -1,4 +1,4 @@
-# BACKEND_INTEGRATION — WoodHub AI Service ↔ Backend (v2.1)
+# BACKEND_INTEGRATION — WoodHub AI Service ↔ Backend (v2.2)
 
 > Đối chiếu với OpenAPI thật của Backend (`https://woodhub-be.onrender.com/v3/api-docs`), snapshot mới nhất
 > `contracts/backend/woodhub-be.openapi.snapshot-2026-10-06.json` (162 operation).
@@ -10,7 +10,7 @@
 
 | Backend (đã có trong OpenAPI 2026-10-06) | AI service | Trạng thái |
 |---|---|---|
-| `POST /api/admin/ai-agent/chat` `AdminAiChatRequest{message, sessionId, lat, lng}` | `POST /v1/agent/manage/chat` | ĐÃ CÓ phía Backend; Agent nhận `sessionId` (alias) |
+| `POST /api/admin/ai-agent/chat` `AdminAiChatRequest{message, sessionId, lat, lng}` | `POST /v1/agent/manage/chat` | ĐÃ CÓ phía Backend; Agent nhận `sessionId` và `lat`/`lng` cấp ngoài (v2.2) |
 | `POST /api/admin/ai-agent/actions/{actionId}/confirm` `ConfirmActionRequest{confirmationCode, sessionId}` | `POST /v1/agent/actions/{id}/confirm` | Giữ để tương thích; luôn `type=error`, `ACTION_NOT_FOUND` (agent chỉ đọc) |
 | `POST /api/admin/ai-agent/actions/{actionId}/cancel` | `POST /v1/agent/actions/{id}/cancel` | như trên |
 | `POST /api/ai-chat/sessions/{sessionId}/messages` `{content, lat, lng}` → `AiChatMessageResponse` | `POST /v1/agent/chat` (hoặc `/chat` cũ) | **CHƯA XÁC MINH** Backend đang gọi endpoint nào |
@@ -33,6 +33,10 @@ dữ liệu riêng; Backend tự quyết định. **Không cần đặt `JWT_SEC
 **Server-to-server (khuyến nghị cho production):** đặt `AGENT_SERVICE_API_KEY` (chuỗi ngẫu nhiên dài) ở AI service và cho Backend
 gửi header `X-Agent-Api-Key: <giá trị>` mọi request tới Agent; thiếu/sai → 401 `SERVICE_UNAUTHORIZED`. Mặc định tắt để không
 phá tích hợp hiện tại. Bổ sung: chỉ cho Backend truy cập Agent ở tầng mạng (private network / allowlist IP).
+
+**Lưu ý vị trí:** gửi GPS thật của thiết bị; không gửi giá trị mặc định. (-90,-180) và (0,0) bị Agent coi là không có vị trí.
+**Rate limit:** Agent giới hạn theo IP client (mặc định 600/phút, `RATE_LIMIT_PER_MINUTE`); 429 của Agent có header
+`X-RateLimit-Layer: ai-agent`. Khi Backend trả 429 cho request GET của Agent, Agent không retry và trả `UPSTREAM_RATE_LIMITED`.
 
 ## 2. AI service → Backend (agent đọc dữ liệu) — allowlist `app/adapters/backend/client.py`, chỉ GET
 

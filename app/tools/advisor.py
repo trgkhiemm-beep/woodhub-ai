@@ -50,6 +50,8 @@ class RecommendInput(ToolInput):
     min_area_cm2: float | None = Field(default=None, gt=0)
     exclude_ids: list[str] = Field(default_factory=list, max_length=20)
     distinct_suppliers: bool = False   # "từ các nhà cung cấp khác nhau" → mỗi nhà cung cấp tối đa 1 mẫu
+    supplier: str | None = Field(default=None, max_length=120)  # chỉ sản phẩm của nhà cung cấp này (tên THẬT)
+    in_stock: bool = False             # khách yêu cầu "còn hàng": kiểm tra tồn kho thật, hết hàng → loại, chưa rõ → ghi rõ
     limit: int = Field(default=3, ge=1, le=5)
     mode: Literal["recommend", "search"] = "recommend"
 
@@ -120,6 +122,7 @@ class Candidate:
     colors: list[str] = field(default_factory=list)
     score: float = 0.0
     reasons: list[str] = field(default_factory=list)
+    stock: str | None = None            # in_stock | low_stock | unknown (chỉ khi khách hỏi "còn hàng")
 
 
 def vnd(v: float | None) -> str:
@@ -162,6 +165,8 @@ def _matches(s: ProductSummary, a: RecommendInput) -> bool:
     if a.category and not (_contains(s.name, a.category) or fold(s.category or "") == fold(a.category)):
         return False
     if a.material and not _contains(f"{s.material or ''} {s.name}", a.material):
+        return False
+    if a.supplier and fold(a.supplier) not in fold(s.supplier_name or ""):
         return False
     if a.room and not a.category:
         affinity = ROOM_AFFINITY.get(fold(a.room), ())
@@ -224,6 +229,31 @@ async def _load_details(cands: list[Candidate], ctx: ToolContext) -> None:
     await asyncio.gather(*(load(c) for c in cands))
 
 
+MAX_STOCK_CHECKS = 8
+LOW_STOCK = 5
+
+
+async def _with_stock(cands: list[Candidate], args: RecommendInput, ctx: ToolContext) -> list[Candidate]:
+    """'… còn hàng': đọc tồn kho THẬT (Backend) cho từng ứng viên theo thứ tự xếp hạng; hết hàng → loại;
+    Backend không trả tồn kho (chưa công khai) → giữ nhưng đánh dấu 'unknown' (không khẳng định còn hàng)."""
+    out: list[Candidate] = []
+    for c in cands[:MAX_STOCK_CHECKS]:
+        if len(out) >= args.limit:
+            break
+        product = c.product or await ctx.ports.catalog.get_product(c.summary.id, ctx.principal)
+        totals: list[int] = []
+        try:
+            for v in product.variants[:3]:
+                totals.append((await ctx.ports.inventory.get_inventory(v.id, ctx.principal)).total)
+        except errors.CapabilityUnavailable:
+            totals = []
+        if totals and sum(totals) <= 0:
+            continue  # hết hàng thật → không gợi ý
+        c.stock = "unknown" if not totals else ("low_stock" if sum(totals) <= LOW_STOCK else "in_stock")
+        out.append(c)
+    return out
+
+
 async def recommend_products(args: RecommendInput, ctx: ToolContext) -> ToolResult:
     catalog = ctx.ports.catalog
     try:
@@ -243,11 +273,16 @@ async def recommend_products(args: RecommendInput, ctx: ToolContext) -> ToolResu
                               -(c.price or 0) if args.price_pref == "high" else 0,
                               (c.dims.area or 1e9) if (args.size == "compact" or args.max_area_cm2) else 0,
                               -(c.dims.area or 0) if (args.size == "large" or args.min_area_cm2) else 0,
-                              abs((budget_ref * 0.85) - (c.price or 0)) if budget_ref else (c.price or 0)))
+                              # tìm kiếm: liệt kê theo giá tăng dần; tư vấn: ưu tiên gần ngân sách
+                              (c.price or 1e12) if args.mode == "search"
+                              else abs((budget_ref * 0.85) - (c.price or 0)) if budget_ref else (c.price or 0)))
     if args.distinct_suppliers:
         seen: set[str] = set()
         cands = [c for c in cands if not (c.summary.supplier_name in seen or seen.add(c.summary.supplier_name or c.summary.id))]
-    top = cands[: args.limit]
+    try:
+        top = await _with_stock(cands, args, ctx) if args.in_stock else cands[: args.limit]
+    except errors.PortError as exc:
+        return error_result("recommend_products", exc)
     data = {
         "mode": args.mode, "distinct_suppliers": args.distinct_suppliers,
         "requirements": args.model_dump(exclude_none=True, exclude={"limit", "mode", "exclude_ids", "distinct_suppliers"}),
@@ -257,7 +292,8 @@ async def recommend_products(args: RecommendInput, ctx: ToolContext) -> ToolResu
                    "supplier": c.summary.supplier_name,
                    "material": c.summary.material, "dimensions": c.dims_text, "area_cm2": c.dims.area,
                    "seats": c.seats, "seats_estimated": c.seats_estimated, "colors": c.colors,
-                   "image_url": c.summary.image_url, "reasons": c.reasons} for c in top],
+                   "image_url": c.summary.image_url, "reasons": c.reasons,
+                   **({"stock": c.stock} if args.in_stock else {})} for c in top],
     }
     return ToolResult(tool="recommend_products", status=ToolStatus.OK if top else ToolStatus.NOT_FOUND, data=data,
                       message=None if top else NO_INFO,

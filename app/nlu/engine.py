@@ -56,7 +56,8 @@ class NLUEngine:
         try:
             pairs, llm_lang, raw_out = await self.llm.classify(raw, context)
         except LLMUnavailable as exc:
-            logger.warning("LLM NLU unavailable → rules fallback: %s", str(exc)[:200])
+            layer = "bedrock-throttled" if "Throttl" in str(exc) or "TooManyRequests" in str(exc) else "bedrock"
+            logger.warning("LLM NLU unavailable layer=%s → rules fallback: %s", layer, str(exc)[:200])
             return NLUResult(frames=frames, source="rules", injection_suspected=injection, language=lang)
         frames = self._dedupe([self._frame_from_llm(intent, span, whole, has_context, raw) for intent, span in pairs])
         return NLUResult(frames=frames, source="llm+rules", injection_suspected=injection,

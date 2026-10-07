@@ -77,7 +77,7 @@ def test_out_of_scope_detected_deterministically(msg):
 @pytest.mark.parametrize("msg,intent", [
     ("giá KTV01", Intent.PRODUCT_DETAIL), ("bàn ăn 6 người dưới 10 triệu", Intent.RECOMMEND),
     ("shop mở cửa mấy giờ", Intent.SUPPLIER_INFO), ("chính sách đổi trả", Intent.POLICY),
-    ("có bàn gỗ không", Intent.PRODUCT_SEARCH), ("show me tables under 3 million", Intent.RECOMMEND),
+    ("có bàn gỗ không", Intent.PRODUCT_SEARCH), ("show me tables under 3 million", Intent.PRODUCT_SEARCH),
     ("ok cảm ơn", Intent.GREETING), ("có đèn ngủ không", Intent.PRODUCT_SEARCH),
 ])
 def test_in_scope_not_refused(msg, intent):

@@ -1,4 +1,4 @@
-# FRONTEND_INTEGRATION — WoodHub AI Agent API v2.1
+# FRONTEND_INTEGRATION — WoodHub AI Agent API v2.2
 
 > Contract **đã implement** (`CONTRACT_VERSION = "1.0"`, tương thích ngược). Nguồn chuẩn: `app/api/schemas.py`, OpenAPI
 > `contracts/agent-api.openapi.json` (hoặc `GET /openapi.json`; test `tests/test_contract.py` giữ file khớp code).
@@ -43,7 +43,7 @@
 | `message` | có | — | ≤ `MAX_MESSAGE_CHARS` (mặc định 2000) |
 | `session_id` | không | `sessionId` | bỏ trống lần đầu; gửi lại giá trị server trả về |
 | `client_message_id` | không | `clientMessageId` | chống gửi trùng |
-| `location` | không | — | chỉ dùng tìm xưởng gần |
+| `location` | không | `lat` + `lng` ở cấp ngoài (như Backend gửi) | chỉ dùng tìm xưởng gần; (-90,-180) và (0,0) bị coi là không có vị trí |
 
 Confirm (`POST /v1/agent/actions/{id}/confirm`): `{"confirmation_code": "…", "session_id": "…"}` — nhận cả
 `confirmationCode`, `sessionId`. Alias được ghi trong OpenAPI ở `x-aliases`. **Response luôn snake_case.**
@@ -74,8 +74,10 @@ Confirm (`POST /v1/agent/actions/{id}/confirm`): `{"confirmation_code": "…", "
 `order_status`, `branch_list`, `workshop_list`, `knowledge`, `taxonomy`, `design_task`, `candidates`
 (`store_info`, `promotion_list`, `policy` còn trong enum để tương thích, không còn được trả). Tiền là số VND — format phía client.
 
-**`message` ngắn**: mỗi sản phẩm một dòng `- Tên — 1.990.000đ` (tối đa 3–5); hỏi giá → tên + giá; hỏi tồn kho →
-`- Tên — còn hàng | sắp hết | hết hàng | chưa có dữ liệu tồn kho`; không lời dẫn/CTA. Chi tiết nằm trong `blocks`.
+**`message` ngắn**: mỗi sản phẩm một dòng `- Tên — 1.990.000đ` (tìm kiếm: tối đa 5, giá tăng dần; tư vấn: tối đa 3; hoặc đúng
+số khách nêu, ≤5); khách hỏi "còn hàng" → thêm `— còn hàng | sắp hết | tồn kho: chưa có thông tin`; hỏi tồn kho một sản phẩm →
+`- Tên — còn hàng | sắp hết | hết hàng | chưa có dữ liệu tồn kho`; so sánh → bảng markdown (Giá, Kích thước, Chất liệu, Tồn kho,
+Nhà cung cấp; ô thiếu = "Chưa có thông tin"). Không lời dẫn/CTA. Chi tiết nằm trong `blocks`.
 
 Câu trả lời cố định — UI có thể so khớp nguyên văn:
 
@@ -83,7 +85,8 @@ Câu trả lời cố định — UI có thể so khớp nguyên văn:
 |---|---|---|
 | Ngoài phạm vi WoodHub | `answer` | `Xin lỗi, tôi chỉ hỗ trợ thông tin và dịch vụ trên WoodHub.` |
 | Không có dữ liệu phù hợp (dữ liệu thật) | `answer` | `Hiện hệ thống chưa cập nhật thông tin phù hợp.` |
-| Không đọc được dữ liệu sản phẩm/nhà cung cấp (Backend lỗi/timeout/dữ liệu hỏng) | `error` | `Hệ thống chưa thể kiểm tra dữ liệu sản phẩm lúc này.` |
+| Backend lỗi/timeout/dữ liệu hỏng | `error` | `Hiện hệ thống chưa thể kiểm tra thông tin này.` |
+| Backend giới hạn tần suất (429) | `error` (`error.code=UPSTREAM_RATE_LIMITED`) | `Hệ thống WoodHub đang bận, vui lòng thử lại sau ít phút.` |
 | Yêu cầu sửa/xóa/tạo dữ liệu | `answer` | `Trợ lý AI chỉ hỗ trợ tra cứu và tư vấn, không thay đổi dữ liệu. Vui lòng cập nhật qua trang quản trị của WoodHub.` |
 | Chưa có nguồn đã xác minh (chính sách, giờ hoạt động, FAQ) | `answer` | `Hiện chưa có thông tin đã xác minh về …` |
 
@@ -154,7 +157,7 @@ Envelope: `{"status":"error","code":"…","message":"…","request_id":"…"}`.
 | 401 | SERVICE_UNAUTHORIZED | chỉ khi bật `AGENT_SERVICE_API_KEY` và Backend gửi thiếu/sai `X-Agent-Api-Key` (lỗi cấu hình server) |
 | 404 | ACTION_NOT_FOUND | `GET /actions/{id}` (không còn action) |
 | 422 | VALIDATION_ERROR | sửa input |
-| 429 | RATE_LIMITED | chờ (chống lạm dụng theo IP, mặc định 600/phút; quota người dùng do Backend) |
+| 429 | RATE_LIMITED | rate limit của **Agent** (header `X-RateLimit-Layer: ai-agent`, `Retry-After`); mặc định 600/phút theo IP |
 | 500 | INTERNAL_ERROR | thử lại |
 
 Lỗi trong hội thoại (Backend chậm/dữ liệu hỏng) trả HTTP 200 với `type="error"` và `error.code` (`UPSTREAM_TIMEOUT`,

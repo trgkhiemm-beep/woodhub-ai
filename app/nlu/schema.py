@@ -60,6 +60,8 @@ class Entities(BaseModel):
     supplier_name: str | None = None                     # tên nhà cung cấp người dùng nhắc tới (khớp danh sách thật)
     supplier_ref: bool = False                           # "shop này", "nhà cung cấp này" → supplier của sản phẩm đang nói
     distinct_suppliers: bool = False                     # "từ các nhà cung cấp khác nhau"
+    count: int | None = Field(default=None, ge=1, le=10)  # "cho tôi 3 bàn", "chọn giúp 3 mẫu" → số sản phẩm muốn xem
+    in_stock: bool = False                               # "… còn hàng" khi tìm kiếm (điều kiện, không phải hỏi tồn kho)
     question: str | None = None                          # câu hỏi gốc cho knowledge search
     asked: list[Literal["price", "dimensions", "material", "color", "description"]] = Field(default_factory=list)  # trường được hỏi
 

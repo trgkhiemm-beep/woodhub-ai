@@ -13,7 +13,8 @@ from app.nlu.lexicon import fold
 from app.nlu.patterns import GREETINGS
 from app.nlu.schema import Entities, Intent
 
-_ASK_RECOMMEND = r"\b(tu van|goi y|recommend|suggest|nen mua|nen chon|phu hop|co mau nao|mau nao|loai nao|cai nao|muon mua|can mua|can tim|muon tim|minh can|toi can|em can|can (1|mot|mot cai|cai)|need|looking for|advise)\b"
+_ASK_RECOMMEND = r"\b(tu van|goi y|recommend|suggest|nen mua|nen chon|chon giup|chon dum|chon ho|dang mua|nen lay|phu hop|co mau nao|mau nao|loai nao|cai nao|muon mua|can mua|can tim|muon tim|minh can|toi can|em can|can (1|mot|mot cai|cai)|need|looking for|advise)\b"
+_ASK_SEARCH = r"\b(tim|kiem|tim kiem|liet ke|show|find|search|xem cac|xem nhung|co nhung)\b"
 _ASK_STOCK = r"\b(con hang|con khong|con ko|con k|con hem|con hong|het hang|ton kho|con bao nhieu|con may|so luong|in stock|available|con (1|mot) cai)\b|\bcon\s*\??$"
 _ASK_PRICE = r"\b(gia|bao nhieu tien|bao tien|bn tien|price|cost|how much|may tien)\b|\bgia bn\b"
 _ASK_DETAIL = r"\b(chi tiet|thong tin|kich thuoc|chat lieu|mau sac|mo ta|detail|size|dimension|lam bang gi)\b"
@@ -121,12 +122,16 @@ def classify_conf(folded: str, e: Entities, *, has_context: bool = False) -> tup
     if (re.search(_ASK_COMPARE, t) and (many or e.ordinal or e.reference)) or asks_which:
         return Intent.COMPARE, True
     if re.search(_ASK_STOCK, t) and (refers or has_context or e.category):
+        # "tìm bàn dưới 3tr còn hàng" = TÌM KIẾM có điều kiện còn hàng (không có sản phẩm cụ thể) — không phải hỏi tồn kho
+        if e.category and not refers and (e.budget_max or e.budget_min or e.material or e.supplier_name or re.search(_ASK_SEARCH, t)):
+            return Intent.PRODUCT_SEARCH, True
         return Intent.INVENTORY, True
     if re.search(_ORDER, t) and not e.product_codes and not re.search(r"\b(huong dan|lam sao|lam the nao|cach)\b", t):
         return Intent.ORDER_STATUS, True
     # Liên hệ / khu vực của NHÀ CUNG CẤP (theo tên, mã sản phẩm hoặc ngữ cảnh). Hỏi chính sách → nhánh POLICY bên dưới.
-    asks_product = re.search(_ASK_PRICE, t) or re.search(_ASK_STOCK, t) or e.category
-    names_supplier = re.search(r"\b(nha cung cap|ncc|supplier|seller|ben ban|ai ban|shop ban|nguoi ban)\b", t)
+    # "Shop của bàn TB06 ở đâu?": có mã sản phẩm → loại sản phẩm trong câu chỉ để gọi tên, không phải đang tìm sản phẩm
+    asks_product = re.search(_ASK_PRICE, t) or re.search(_ASK_STOCK, t) or (e.category and not e.product_codes)
+    names_supplier = re.search(r"\b(nha cung cap|ncc|supplier|seller|ben ban|ai ban|shop ban|nguoi ban|shop cua|cua hang cua)\b", t)
     if (e.store_fields or e.supplier_ref or (e.supplier_name and re.search(r"\b(o dau|lien he|thong tin|la ai|ban gi)\b", t))
             or (names_supplier and e.product_codes)) \
             and not asks_product and not e.policy_type and (not e.product_codes or names_supplier or e.store_fields):
@@ -149,7 +154,9 @@ def classify_conf(folded: str, e: Entities, *, has_context: bool = False) -> tup
         return Intent.RECOMMEND, True
     if (e.reference or e.ordinal) and (re.search(_ASK_PRICE, t) or re.search(_ASK_DETAIL, t) or has_context):
         return Intent.PRODUCT_DETAIL, True
-    if re.search(_ASK_RECOMMEND, t) or e.seats or e.size or e.use_case or e.price_pref or (e.category and (e.budget_max or e.budget_min)):
+    # TÌM KIẾM ("tìm bàn dưới 3tr", "có ghế gỗ không") ≠ TƯ VẤN ("gợi ý", "chọn giúp", "nên mua", số người, nhỏ gọn…)
+    if re.search(_ASK_RECOMMEND, t) or e.seats or e.size or e.use_case or e.price_pref or (
+            e.category and (e.budget_max or e.budget_min) and not re.search(_ASK_SEARCH, t)):
         return Intent.RECOMMEND, bool(e.category or e.seats or e.size or e.price_pref or e.use_case)
     if e.category or e.material or e.budget_max or e.budget_min or e.room or e.style:
         return Intent.PRODUCT_SEARCH, bool(e.category or e.material)

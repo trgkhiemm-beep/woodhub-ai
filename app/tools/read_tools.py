@@ -152,6 +152,18 @@ async def get_product(args: GetProductInput, ctx: ToolContext) -> ToolResult:
                                           record_id=product.id, version=product.updated_at)])
 
 
+async def _stock_of(product, variant, ctx: ToolContext) -> int | None:
+    """Tổng tồn kho THẬT của biến thể (hoặc các biến thể); Backend không công khai → None (UI: "Chưa có thông tin")."""
+    variants = [variant] if variant else product.variants[:3]
+    total = 0
+    try:
+        for v in variants:
+            total += (await ctx.ports.inventory.get_inventory(v.id, ctx.principal)).total
+    except errors.CapabilityUnavailable:
+        return None
+    return total if variants else None
+
+
 class CompareInput(ToolInput):
     products: list[ProductRef] = Field(min_length=2, max_length=3)
 
@@ -164,7 +176,8 @@ async def compare_products(args: CompareInput, ctx: ToolContext) -> ToolResult:
             return product
         v = pick_variant(product, ref.sku)
         prices = product.price_range
-        rows.append({"code": ref.sku, "name": product.name, "material": product.material, "category": product.category,
+        stock = await _stock_of(product, v, ctx)
+        rows.append({"stock": stock, "code": ref.sku, "name": product.name, "material": product.material, "category": product.category,
                      "price": v.price if v else (prices[0] if prices else None),
                      "dimensions": v.dimensions if v else next((x.dimensions for x in product.variants if x.dimensions), None),
                      "color": v.color if v else None, "product_id": product.id, "supplier": product.supplier_name})

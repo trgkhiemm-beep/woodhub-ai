@@ -12,7 +12,8 @@ from app.nlu.schema import Entities
 
 # Cụm che trước khi khớp danh mục (từ đa nghĩa khi viết không dấu).
 _MASKS = [
-    r"\btu van\b", r"\btu\s+\d", r"\btu (nhien|anh|dong|choi|do|lam|tao|chon|xa)\b",
+    r"\btu van\b", r"\btu\s+\d(?![\d.,]*\s*(canh|ngan|tang|buong|cua|khoang)\b)",  # "từ 2tr…" ≠ "tủ 2 cánh"
+r"\btu (nhien|anh|dong|choi|do|lam|tao|chon|xa)\b",
     r"\btu (ngay|thang|luc|dau|khi|nay|hom|sang|chieu|toi)\b", r"\bke (hoach|toan|ca|chuyen|cho|ve|ra|lai|tu|ten)\b",
     r"\bban (oi|co|la|dang|muon|can|giup|cho (minh|toi|em)|nhe|a)\b", r"\b(cam on|chao|nho|hoi) ban\b", r"^ban\b(?= (oi|co|la)\b)",
     r"\bban hang\b", r"\bban chay\b",
@@ -86,7 +87,9 @@ def money(folded: str) -> list[float]:
             v += int(d) * (100_000 if len(d) == 1 else 1_000)  # "2tr5"=2,5tr · "2 triệu 50"=2.050.000
         vals.append((m.start(), v))
         taken.append(m.span())
-    for m in re.finditer(r"(\d+(?:[.,]\d+)?)\s*(?:nghin|ngan|k|thousand)(?![a-z])", folded):
+    for m in re.finditer(r"(\d+(?:[.,]\d+)?)\s*(nghin|ngan|k|thousand)(?![a-z])", folded):
+        if m.group(2) == "ngan" and float(m.group(1).replace(",", ".")) < 10:
+            continue  # "tủ 3 ngăn" (bỏ dấu trùng "3 ngàn"): không ai bán nội thất 3.000đ
         if not any(a <= m.start() < b for a, b in taken):
             vals.append((m.start(), float(m.group(1).replace(",", ".")) * 1_000))
     for m in re.finditer(r"(?<![\d.,])(\d{1,3}(?:[.,]\d{3})+|\d{5,})(?![\d.,]*\s*(?:trieu|tr|k|nghin|%|cm|mm))", folded):
@@ -101,9 +104,21 @@ _MAX_PREFIX = r"(duoi|nho hon|khong qua|toi da|it hon|re hon|thap hon|under|belo
 _MIN_PREFIX = r"(tren|hon|lon hon|cao hon|it nhat|toi thieu|over|above|more than|from|>=?)"
 
 
+_PRICE_M = re.compile(r"\b(duoi|tam|khoang|toi da|khong qua|re hon|gia|tren|hon|<|>)\s*(\d{1,3}(?:[.,]\d)?)\s*m\b(?!\s*\d)")
+_SIZE_WORDS = r"\b(dai|rong|cao|sau|kich thuoc|kich co|chieu|size|met|mét|dien tich)\b"
+
+
+def _price_m(folded: str) -> str:
+    """'dưới 3m' (tiền tố giá, không có từ kích thước) → 'dưới 3tr'. 'dài dưới 2m' giữ nguyên (mét)."""
+    if re.search(_SIZE_WORDS, folded):
+        return folded
+    return _PRICE_M.sub(lambda m: f"{m.group(1)} {m.group(2)}tr", folded)
+
+
 def budget(folded: str) -> tuple[float | None, float | None]:
-    """Ràng buộc giá: (min, max). 'từ 2tr đến 5tr', '2tr-5tr', 'dưới 2tr5', '< 3tr', 'tầm 3 củ',
+    """Ràng buộc giá: (min, max). 'từ 2tr đến 5tr', '2tr-5tr', 'dưới 2tr5', '< 3tr', 'tầm 3 củ', 'dưới 3m',
     '2 triệu trở xuống', '5 triệu trở lên', 'hơn 5 triệu'."""
+    folded = _price_m(folded)
     m = re.search(r"\b(?:tu|from|between)\s+(.+?)\s*(?:den|toi|to|and|-|~)\s*(.+)", folded) or \
         re.search(r"(\d[\d.,]*\s*[a-z]*)\s*(?:-|~|den|toi)\s*(\d[\d.,]*\s*[a-z]*\d*)", folded)
     whole = money(folded)
@@ -206,6 +221,20 @@ def asked_item(raw: str) -> str | None:
     return text[m.start(1):m.end(1)].strip()
 
 
+_COUNT_NOUNS = r"(mau|cai|chiec|san pham|sp|bo|loai|lua chon|ban|ghe|tu|ke|giuong|sofa|den|guong)"
+
+
+def wanted_count(folded: str) -> int | None:
+    """'cho tôi 3 bàn', 'chọn giúp 3 mẫu bàn', 'top 5 ghế' → số sản phẩm muốn xem (không nhầm '6 người', '2 cánh', 'mẫu 2')."""
+    m = re.search(rf"(?:^|\b(?:cho|chon|lay|goi y|tim|xem|top|liet ke|gioi thieu)\b[\w\s]{{0,12}}?)\b([1-9])\s+{_COUNT_NOUNS}\b", folded)
+    if not m:
+        return None
+    rest = folded[m.end():m.end() + 12]
+    if re.match(r"\s*(nguoi|ng|cho ngoi|canh|ngan|tang|met|m\b|cm)", rest):
+        return None
+    return int(m.group(1))
+
+
 def asked_fields(folded: str) -> list[str]:
     """Trường người dùng hỏi về một sản phẩm → câu trả lời chỉ gồm trường đó."""
     out = [name for name, rx in _ASKED if re.search(rx, folded)]
@@ -240,7 +269,7 @@ def extract(raw: str, lex: Lexicon) -> Entities:
         prefix = re.match(r"[A-Za-z]+", c)
         if prefix:
             code_spans |= {(m.start(), m.end()) for m in re.finditer(rf"(?<![a-z]){prefix.group(0).lower()}[\s\-_]?\d", masked)}
-    e.amounts = money(raw_folded)
+    e.amounts = money(_price_m(raw_folded))
     cat = lex.match(masked, "categories", exclude=code_spans)
     if cat:
         e.category = cat[0]
@@ -265,8 +294,10 @@ def extract(raw: str, lex: Lexicon) -> Entities:
         fields += ["hotline", "email"]
     if re.search(r"\bemail\b", base):
         fields.append("email")
-    if re.search(r"\b(dia chi|address)\b", base):
-        fields.append("address")
+    if re.search(r"\b(dia chi|address)\b", base) or (
+            re.search(r"\b(o dau|nam o|cho nao)\b", base) and not (e.city and not e.product_codes)  # "cửa hàng ở HCM ở đâu" = chi nhánh
+            and (e.product_codes or re.search(r"\b(shop|cua hang|nha cung cap|ncc|ben ban|nguoi ban)\b", base))):
+        fields.append("address")  # "Shop của bàn TB06 ở đâu?", "KTV01 bán ở đâu"
     e.store_fields = list(dict.fromkeys(fields))
     if u := UUID_RE.search(raw or ""):
         e.task_id = u.group(0)
@@ -287,6 +318,8 @@ def extract(raw: str, lex: Lexicon) -> Entities:
         e.use_case = None if (e.room and fold(e.room) == m.group(2).strip()) else m.group(2).strip()
     if not (e.category or e.product_codes):
         e.product_name = asked_item(raw)
+    e.count = wanted_count(masked)
+    e.in_stock = bool(re.search(r"\b(con hang|co san hang|san hang|in stock)\b", base))
     e.asked = asked_fields(base)
     e.question = (raw or "").strip()[:300]
     return e

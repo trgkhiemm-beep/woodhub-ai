@@ -28,9 +28,10 @@ from app.container import Container, build_container
 logger = logging.getLogger("woodhub")
 
 
-def _error(status: int, code: str, message: str, request: Request) -> JSONResponse:
+def _error(status: int, code: str, message: str, request: Request, headers: dict[str, str] | None = None) -> JSONResponse:
     rid = request.headers.get("X-Request-Id")
-    return JSONResponse(status_code=status, content={"status": "error", "code": code, "message": message, "request_id": rid})
+    return JSONResponse(status_code=status, content={"status": "error", "code": code, "message": message, "request_id": rid},
+                        headers=headers)
 
 
 async def _keep_backend_awake(container: Container, every: int) -> None:
@@ -72,7 +73,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
         detail: Any = exc.detail
         if isinstance(detail, dict):
-            return _error(exc.status_code, detail.get("code", "HTTP_ERROR"), detail.get("message", ""), request)
+            return _error(exc.status_code, detail.get("code", "HTTP_ERROR"), detail.get("message", ""), request, exc.headers)
         return _error(exc.status_code, "HTTP_ERROR", str(detail), request)
 
     @app.exception_handler(RequestValidationError)

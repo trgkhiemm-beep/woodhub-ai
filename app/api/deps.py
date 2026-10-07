@@ -15,6 +15,7 @@ from collections import defaultdict, deque
 from fastapi import Depends, HTTPException, Request
 
 from app.container import Container
+from app.domain.messages import AGENT_BUSY
 from app.domain.principal import Principal
 
 logger = logging.getLogger("woodhub.api")  # không log token/secret/header
@@ -63,7 +64,9 @@ class RateLimiter:
         while q and now - q[0] > 60:
             q.popleft()
         if len(q) >= self._limit:
-            raise HTTPException(status_code=429, detail={"code": "RATE_LIMITED", "message": "Hệ thống đang quá tải, vui lòng thử lại sau ít phút."})
+            logger.warning("rate_limited layer=agent key=%s limit=%d/min", key[:40], self._limit)
+            raise HTTPException(status_code=429, detail={"code": "RATE_LIMITED", "message": AGENT_BUSY},
+                                headers={"X-RateLimit-Layer": "ai-agent", "Retry-After": "30"})
         q.append(now)
         if len(self._hits) > 20000:
             self._hits.clear()

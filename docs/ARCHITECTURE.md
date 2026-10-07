@@ -1,4 +1,4 @@
-# WoodHub AI Agent — Architecture (v2.1 — customer-facing, read-only, no user auth)
+# WoodHub AI Agent — Architecture (v2.2 — customer-facing, read-only, no user auth, stabilized)
 
 > Tài liệu khớp với code trên nhánh `feature/ai-agent`. Contract: `docs/FRONTEND_INTEGRATION.md`, `docs/BACKEND_INTEGRATION.md`,
 > `contracts/agent-api.openapi.json`.
@@ -44,7 +44,9 @@ Câu cố định (`app/domain/messages.py`):
 |---|---|
 | Ngoài phạm vi WoodHub | `Xin lỗi, tôi chỉ hỗ trợ thông tin và dịch vụ trên WoodHub.` |
 | Không có dữ liệu phù hợp | `Hiện hệ thống chưa cập nhật thông tin phù hợp.` |
-| Backend lỗi/timeout/dữ liệu hỏng (sản phẩm, nhà cung cấp) | `Hệ thống chưa thể kiểm tra dữ liệu sản phẩm lúc này.` |
+| Backend lỗi/timeout/dữ liệu hỏng | `Hiện hệ thống chưa thể kiểm tra thông tin này.` |
+| Backend trả 429 cho Agent | `Hệ thống WoodHub đang bận, vui lòng thử lại sau ít phút.` (`error.code=UPSTREAM_RATE_LIMITED`) |
+| Rate limit của chính Agent (HTTP 429) | `Trợ lý AI đang nhận quá nhiều yêu cầu, vui lòng thử lại sau ít phút.` (header `X-RateLimit-Layer: ai-agent`) |
 | Yêu cầu thay đổi dữ liệu | `Trợ lý AI chỉ hỗ trợ tra cứu và tư vấn, không thay đổi dữ liệu. Vui lòng cập nhật qua trang quản trị của WoodHub.` |
 | Chưa có nguồn (chính sách, giờ hoạt động, FAQ) | `Hiện chưa có thông tin đã xác minh về …` |
 
@@ -103,6 +105,17 @@ trên dữ liệu thật → (chỉ khi cần số chỗ/kích thước/màu) đ
 - Mỗi item có `supplier`; so sánh (`compare_products`) có `supplier` từng dòng.
 - Không còn sản phẩm → `Hiện hệ thống chưa cập nhật thông tin phù hợp.`
 
+### 5.1 Tìm kiếm vs tư vấn (v2.2)
+
+| Câu | Intent | `recommend_products` | Kết quả |
+|---|---|---|---|
+| "tìm bàn dưới 3 triệu", "có bàn học nào không", "tìm ghế gỗ", "Cho tôi 3 bàn" | `product_search` | `mode=search`, `limit` = số khách nêu (mặc định 5) | đúng điều kiện, **giá tăng dần** |
+| "gợi ý bàn học phù hợp", "chọn giúp 3 mẫu", "bàn nào đáng mua", "bàn ăn 6 người dưới 10tr" | `recommend` | `mode=recommend`, `limit` mặc định 3 | xếp hạng theo nhu cầu (gần ngân sách, số chỗ…) |
+
+Điều kiện parse deterministic: loại, giá min/max (kể cả "dưới 3m" = 3 triệu khi có tiền tố giá và không có từ kích thước),
+chất liệu, màu, số chỗ, kích thước, **nhà cung cấp** (tên thật), **còn hàng** (điều kiện: đọc tồn kho thật; hết hàng → loại;
+Backend không công khai → ghi "tồn kho: chưa có thông tin", không khẳng định còn hàng), **số lượng** ("3 bàn").
+
 ## 6. Tools (11, tất cả chỉ đọc)
 
 | Tool | Loại | Quyền xem dữ liệu | Nguồn (Backend) |
@@ -122,6 +135,12 @@ trên dữ liệu thật → (chỉ khi cần số chỗ/kích thước/màu) đ
 Registry từ chối khi khởi động mọi tool không phải READ/SEARCH/REALTIME và các tên cấm (`execute_sql`, `update_*`,
 `create_promotion`, `adjust_inventory`, `delete_*`, `http_request`…). `BackendClient` chặn mọi method khác GET trước khi gửi.
 
+### 6.1 So sánh, vị trí, tra mã (v2.2)
+- `compare_products` trả bảng markdown: Giá · Kích thước · Chất liệu · Tồn kho · Nhà cung cấp; ô thiếu → "Chưa có thông tin".
+- Vị trí: nhận `location{lat,lng}` hoặc `lat`/`lng` cấp ngoài (đúng `AdminAiChatRequest` của Backend). (-90,-180) (giá trị mẫu
+  Swagger sinh từ `minimum`) và (0,0) bị coi là **không có vị trí** → "Bạn hãy bật chia sẻ vị trí…" (không giả định).
+- Tra mã không tồn tại: chỉ mục SKU→product_id dựng một lần (TTL 5 phút, không chứa giá/tồn kho) → lần sau 1 request thay vì ~30.
+
 ## 7. Truy cập & audit
 
 - **Agent không có lớp phân quyền người dùng.** Mọi tool chỉ đọc và giống nhau cho mọi người gọi. Dữ liệu riêng (đơn hàng,
@@ -133,6 +152,19 @@ Registry từ chối khi khởi động mọi tool không phải READ/SEARCH/REA
 - "Tôi là admin" trong tin nhắn bị gắn cờ `security.injection_suspected` và không thay đổi gì (không có gì để nâng quyền).
 - **Audit** (`app/audit.py`, JSONL): `security.injection_suspected`, `agent.change_request_refused`; token/password/secret bị
   `[REDACTED]`; không log header `Authorization`.
+
+### 7.1 Rate limit — xác định đúng tầng (v2.2)
+
+| Tầng | Khi nào | Agent làm gì |
+|---|---|---|
+| Backend quota `ai_chat` | khách hết lượt chat | Backend trả 429 cho client; không tới Agent |
+| **Agent** (HTTP 429 `RATE_LIMITED`) | vượt `RATE_LIMIT_PER_MINUTE` theo IP client | header `X-RateLimit-Layer: ai-agent`, `Retry-After: 30`; log `rate_limited layer=agent` |
+| Backend API → Agent (429) | Backend giới hạn tool của Agent | **không retry** (retry ngay chỉ làm nặng thêm); `error.code=UPSTREAM_RATE_LIMITED`; log `layer=backend` |
+| AWS Bedrock (throttling) | chỉ khi bộ luật không chắc và gọi LLM | không lộ cho khách: NLU chuyển sang bộ luật; log `layer=bedrock-throttled`; boto3 retry tối đa 2 |
+
+Root cause `RATE_LIMITED` khi test qua Backend (bản cũ): limiter của Agent **30 request/phút theo IP**; sau Backend mọi người dùng
+chung một IP → cả hệ thống chỉ được 30 tin/phút. v2.1+ mặc định 600/phút (cấu hình được). Tool sản phẩm
+(`recommend_products`, tìm kiếm, so sánh) **không gọi LLM**; retry Backend chỉ cho timeout/5xx, tối đa `BACKEND_MAX_RETRIES` (2).
 
 ## 8. Source of truth & provenance
 
@@ -199,6 +231,9 @@ không user JWT): 13/13 (v2.1).
 
 ## 12. Thay đổi lớn
 
+- **v2.2**: tách tìm kiếm/tư vấn; số lượng, lọc nhà cung cấp, điều kiện còn hàng; "dưới 3m"; "tủ 3 ngăn"/"tủ 2 cánh";
+  "Shop của … ở đâu"; bảng so sánh có tồn kho; vị trí cấp ngoài + bỏ giá trị mẫu Swagger; rate limit theo tầng, không retry 429;
+  chỉ mục SKU; thông điệp lỗi API thống nhất.
 - **v2.1**: bỏ xác thực/phân quyền người dùng khỏi Agent (verify JWT, `/api/users/me`, role, 401/403, "cần đăng nhập");
   token chuyển tiếp nguyên trạng; thêm khóa server-to-server tùy chọn.
 - **v2.0**: bỏ toàn bộ mutation (tool ghi, PendingAction/xác nhận, parser lệnh ghi, PUT/PATCH/POST trong allowlist), bỏ

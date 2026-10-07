@@ -85,7 +85,8 @@ def test_multi_intent_split():
     ("kiểm tra đơn hàng", Intent.ORDER_STATUS), ("Cách theo dõi đơn hàng trên app", Intent.GUIDE_FAQ), ("Chính sách đổi trả thế nào", Intent.POLICY), ("Có voucher nào không", Intent.PROMOTION),
     ("Showroom ở Hà Nội", Intent.BRANCHES), ("Danh mục sản phẩm gồm những gì", Intent.TAXONOMY),
     ("Hướng dẫn tạo mẫu 3D từ ảnh", Intent.GUIDE_FAQ), ("Thêm vào giỏ hàng", Intent.CART), ("Tìm xưởng gần tôi", Intent.WORKSHOP),
-    ("So sánh KTV01 và KTV02", Intent.COMPARE), ("Tìm bàn gỗ dưới 10 triệu", Intent.RECOMMEND),
+    ("So sánh KTV01 và KTV02", Intent.COMPARE), ("Tìm bàn gỗ dưới 10 triệu", Intent.PRODUCT_SEARCH),
+    ("Gợi ý bàn gỗ dưới 10 triệu", Intent.RECOMMEND), ("bàn ăn dưới 10 triệu", Intent.RECOMMEND),
 ])
 def test_rule_intents(msg, intent):
     assert parse(msg).primary.intent == intent

@@ -21,6 +21,7 @@ TOOL_TOPICS = {
 }
 POLICY_LABELS = {"shipping": "giao hàng", "return": "đổi trả", "warranty": "bảo hành", "payment": "thanh toán",
                  "terms": "điều khoản", "privacy": "bảo mật"}
+STOCK_LABELS = {"in_stock": "còn hàng", "low_stock": "sắp hết", "unknown": "tồn kho: chưa có thông tin"}
 LOW_STOCK_THRESHOLD = 5  # ≤ ngưỡng → "sắp hết" (không công khai số lượng chính xác)
 
 CLARIFY = "Bạn cần tìm sản phẩm nào (tên, mã hoặc loại nội thất)?"
@@ -69,7 +70,8 @@ def compose_results(results: list[ToolResult], *, asked: list[str] | None = None
                 out.blocks.append(Block(kind="candidates", data=r.data["candidates"]))
         elif r.status == ToolStatus.ERROR:
             out.kind = "error"
-            out.lines.append(PRODUCT_API_ERROR if product else (r.message or SYSTEM_ERROR))
+            out.lines.append(r.message if r.error_code == "UPSTREAM_RATE_LIMITED" else
+                             PRODUCT_API_ERROR if product else (r.message or SYSTEM_ERROR))
         elif r.status == ToolStatus.NOT_FOUND and product:
             out.lines.append(NO_INFO)
             if r.data:
@@ -114,6 +116,26 @@ def _product_lines(d: dict[str, Any], asked: list[str]) -> list[str]:
     return lines
 
 
+MISSING = "Chưa có thông tin"
+
+
+def _cell(value: Any) -> str:
+    return str(value).replace("|", "/") if value not in (None, "") else MISSING
+
+
+def _compare_table(rows: list[dict[str, Any]]) -> list[str]:
+    """Bảng markdown ngắn; ô thiếu dữ liệu ghi "Chưa có thông tin" (không tự điền)."""
+    def stock(r: dict[str, Any]) -> str:
+        return MISSING if r.get("stock") is None else stock_label(r["stock"])
+
+    fields = [("Giá", lambda r: vnd(r["price"]) if r.get("price") is not None else MISSING),
+              ("Kích thước", lambda r: _cell(r.get("dimensions"))), ("Chất liệu", lambda r: _cell(r.get("material"))),
+              ("Tồn kho", stock), ("Nhà cung cấp", lambda r: _cell(r.get("supplier")))]
+    lines = ["| | " + " | ".join(_cell(r["name"]) for r in rows) + " |", "|---" * (len(rows) + 1) + "|"]
+    lines += [f"| {label} | " + " | ".join(fn(r) for r in rows) + " |" for label, fn in fields]
+    return lines
+
+
 def _supplier_lines(d: dict[str, Any]) -> list[str]:
     name = d["name"]
     if d.get("topic"):
@@ -150,17 +172,17 @@ def _compose_ok(r: ToolResult, out: Composed, asked: list[str]) -> None:
             out.lines.append(f"- {b.get('name') or 'Cửa hàng'}: {loc or 'chưa có địa chỉ'}{dist}{phone}")
         out.blocks.append(Block(kind="workshop_list" if t == "find_nearby_workshops" else "branch_list", data=d))
     elif t == "recommend_products":
-        show_supplier = d.get("distinct_suppliers")
-        out.lines += [f"- {it['name']} — {vnd(it.get('price'))}" + (f" ({it['supplier']})" if show_supplier and it.get("supplier") else "")
+        show_supplier = d.get("distinct_suppliers") or d.get("requirements", {}).get("supplier")
+        out.lines += [f"- {it['name']} — {vnd(it.get('price'))}"
+                      + (f" ({it['supplier']})" if show_supplier and it.get("supplier") else "")
+                      + (f" — {STOCK_LABELS[it['stock']]}" if it.get("stock") else "")
                       for it in d["items"]]
         out.blocks.append(Block(kind="recommendation", data=d))
     elif t == "get_product":
         out.lines += _product_lines(d, asked)
         out.blocks.append(Block(kind="product_detail", data=d))
     elif t == "compare_products":
-        for row in d["rows"]:
-            extra = ", ".join(x for x in (row.get("supplier"), row.get("material"), row.get("dimensions")) if x)
-            out.lines.append(f"- {row['name']} — {vnd(row.get('price'))}" + (f" ({extra})" if extra else ""))
+        out.lines += _compare_table(d["rows"])
         out.blocks.append(Block(kind="product_comparison", data=d["rows"]))
     elif t == "get_inventory":
         for v in d["variants"]:
